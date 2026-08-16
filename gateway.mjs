@@ -1,0 +1,292 @@
+// dsh-mobile-mini — 最小化 DSH 移动端网关
+// 单文件、零依赖。只做三件事：
+//   1. 令牌认证（?t=<token> 首次登录 → HttpOnly Cookie）
+//   2. 反向代理到本机 DSH Web UI（含 WebSocket 隧道），头清洗后上游看到的永远是本机访问
+//   3. HTML 注入 manifest/meta，让手机可以「添加到主屏」
+//
+// 运行：node gateway.mjs
+// 配置：同目录 config.json（首次运行自动生成随机 token），或环境变量覆盖：
+//   DSH_GATE_PORT         监听端口（默认 3088，只绑 127.0.0.1）
+//   DSH_GATE_TARGET_PORT  DSH Web UI 端口（默认 3080）
+//   DSH_GATE_TOKEN        访问令牌（设置后不再读写 config.json）
+
+import http from 'node:http'
+import net from 'node:net'
+import fs from 'node:fs'
+import path from 'node:path'
+import crypto from 'node:crypto'
+import { fileURLToPath } from 'node:url'
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url))
+
+// ---- config ---------------------------------------------------------------
+const CONFIG_PATH = path.join(__dirname, 'config.json')
+let fileCfg = {}
+try { fileCfg = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8')) } catch { /* first run */ }
+
+let TOKEN = process.env.DSH_GATE_TOKEN || fileCfg.token
+if (!TOKEN) {
+  TOKEN = crypto.randomBytes(24).toString('base64url')
+  fs.writeFileSync(CONFIG_PATH, JSON.stringify({ token: TOKEN }, null, 2) + '\n', { mode: 0o600 })
+}
+const PORT = Number(process.env.DSH_GATE_PORT || fileCfg.port || 3088)
+const TARGET_HOST = '127.0.0.1'
+const TARGET_PORT = Number(process.env.DSH_GATE_TARGET_PORT || fileCfg.targetPort || 3080)
+const COOKIE_NAME = 'dg_token'
+const HTML_LIMIT = 4 * 1024 * 1024
+
+// ---- helpers ----------------------------------------------------------------
+function parseCookies(req) {
+  const out = {}
+  const h = req.headers.cookie
+  if (typeof h !== 'string' || h === '') return out
+  for (const part of h.split(';')) {
+    const i = part.indexOf('=')
+    if (i < 0) continue
+    const k = part.slice(0, i).trim()
+    if (k) out[k] = part.slice(i + 1).trim()
+  }
+  return out
+}
+
+function tokenEq(a, b) {
+  const ba = Buffer.from(String(a || ''))
+  const bb = Buffer.from(String(b || ''))
+  return ba.length === bb.length && ba.length > 0 && crypto.timingSafeEqual(ba, bb)
+}
+
+function queryTicket(url) {
+  const q = String(url || '').indexOf('?')
+  if (q < 0) return undefined
+  const m = url.slice(q + 1).match(/(?:^|&)t=([^&]*)/)
+  return m ? decodeURIComponent(m[1]) : undefined
+}
+
+function esc(s) {
+  return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+}
+
+// 转发到 dsh 的头白名单：抹掉一切能暴露「非本机访问」的痕迹
+// - host 重写为 127.0.0.1:3080
+// - 丢弃 origin / referer / x-forwarded-* / forwarded / x-real-ip
+// - 丢弃 accept-encoding：强制上游返回未压缩内容，HTML 注入才安全
+// - cookie 中剔除网关自己的 dg_token
+function cleanHeaders(req) {
+  const drop = new Set(['host', 'origin', 'referer', 'connection', 'keep-alive', 'te', 'trailer',
+    'transfer-encoding', 'upgrade', 'proxy-connection', 'proxy-authorization', 'proxy-authenticate',
+    'accept-encoding', 'forwarded', 'x-real-ip'])
+  const out = {}
+  for (const k in req.headers) {
+    const lk = k.toLowerCase()
+    if (drop.has(lk) || lk.startsWith('x-forwarded-')) continue
+    if (lk === 'cookie') {
+      const kept = String(req.headers[k]).split(';')
+        .filter(p => p.split('=')[0].trim() !== COOKIE_NAME).join(';')
+      if (kept.trim()) out[k] = kept
+      continue
+    }
+    out[k] = req.headers[k]
+  }
+  out['host'] = TARGET_HOST + ':' + TARGET_PORT
+  return out
+}
+
+// ---- auth failure soft limit（防在线爆破；frp 下所有来源都是 127.0.0.1，故按全局计） ----
+let fails = []
+function failLimited() {
+  const now = Date.now()
+  fails = fails.filter(t => now - t < 60_000)
+  return fails.length >= 30
+}
+const noteFail = () => fails.push(Date.now())
+
+// ---- pages -------------------------------------------------------------------
+function page(title, body) {
+  return '<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">' +
+    '<meta name="viewport" content="width=device-width,initial-scale=1">' +
+    '<title>' + esc(title) + '</title>' +
+    '<style>body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;' +
+    'background:#0f1115;color:#e6e6e6;font:16px/1.6 system-ui,sans-serif}' +
+    '.card{max-width:22rem;padding:2rem;text-align:center}.muted{color:#8b8f98;font-size:.9em}</style>' +
+    '</head><body><div class="card">' + body + '</div></body></html>'
+}
+
+const UNAUTH_PAGE = page('未授权', '<h2>🔒 DSH Mobile Gate</h2><p class="muted">此网关需要访问令牌。<br>请在首次访问的 URL 中携带 <code>?t=&lt;token&gt;</code>。</p>')
+const DENY_PAGE = page('令牌无效', '<h2>🚫 令牌无效</h2><p class="muted">请检查令牌是否正确。</p>')
+const LIMITED_PAGE = page('请稍后再试', '<h2>⏳ 尝试过于频繁</h2><p class="muted">请一分钟后再试。</p>')
+
+function sendPage(res, status, html) {
+  res.writeHead(status, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' })
+  res.end(html)
+}
+
+// ---- /pwa/* 静态资产 -----------------------------------------------------------
+const PWA_DIR = path.join(__dirname, 'pwa')
+const MIME = {
+  '.json': 'application/manifest+json',
+  '.png': 'image/png',
+  '.svg': 'image/svg+xml',
+  '.js': 'text/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.html': 'text/html; charset=utf-8',
+}
+
+function servePwa(req, res) {
+  const rel = decodeURIComponent(req.url.slice('/pwa/'.length).split('?')[0])
+  if (!rel || rel.includes('..') || rel.includes('\0') || rel.startsWith('/')) {
+    res.writeHead(404); res.end('Not Found'); return
+  }
+  const file = path.normalize(path.join(PWA_DIR, rel))
+  if (!file.startsWith(PWA_DIR + path.sep)) { res.writeHead(404); res.end('Not Found'); return }
+  fs.readFile(file, (err, data) => {
+    if (err) { res.writeHead(404); res.end('Not Found'); return }
+    const headers = {
+      'Content-Type': MIME[path.extname(file).toLowerCase()] || 'application/octet-stream',
+      'Cache-Control': 'public, max-age=3600',
+    }
+    // sw.js 在 /pwa/ 下，默认作用域只有 /pwa/；要控制整站必须显式放宽
+    if (path.basename(file) === 'sw.js') headers['Service-Worker-Allowed'] = '/'
+    res.writeHead(200, headers)
+    res.end(data)
+  })
+}
+
+// ---- HTML 注入：仅 manifest + 安装相关 meta -------------------------------------
+const INJECT_SNIPPET =
+  '<link rel="manifest" href="/pwa/manifest.json">' +
+  '<meta name="theme-color" content="#0f1115">' +
+  '<meta name="mobile-web-app-capable" content="yes">' +
+  '<meta name="apple-mobile-web-app-capable" content="yes">' +
+  '<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">' +
+  '<meta name="apple-mobile-web-app-title" content="DSH">' +
+  '<link rel="apple-touch-icon" href="/pwa/icons/icon-192.png">' +
+  // 注册最小 SW：Android Chrome 的可安装性硬性条件；对页面行为零影响
+  '<script>if("serviceWorker"in navigator){window.addEventListener("load",function(){navigator.serviceWorker.register("/pwa/sw.js",{scope:"/"}).catch(function(){})})}</script>'
+
+function injectHtml(html) {
+  // 必须紧跟 <head> 之后：dsh 自带 <link rel="manifest">（无 PNG 图标，不满足
+  // Chrome 安装条件），规范规定只认文档中第一个 manifest 链接，先到先得。
+  const open = /<head[^>]*>/i.exec(html)
+  if (open) {
+    const at = open.index + open[0].length
+    return html.slice(0, at) + INJECT_SNIPPET + html.slice(at)
+  }
+  const close = /<\/head>/i.exec(html)
+  if (close) return html.slice(0, close.index) + INJECT_SNIPPET + html.slice(close.index)
+  return html + INJECT_SNIPPET
+}
+
+// ---- 反向代理 -------------------------------------------------------------------
+function forward(req, res) {
+  const upstream = http.request({
+    host: TARGET_HOST, port: TARGET_PORT,
+    method: req.method, path: req.url,
+    headers: cleanHeaders(req),
+  }, (upRes) => {
+    const h = { ...upRes.headers }
+    const isHtml = String(h['content-type'] || '').includes('text/html') &&
+      (!h['content-encoding'] || h['content-encoding'] === 'identity')
+    if (!isHtml) {
+      res.writeHead(upRes.statusCode || 502, h)
+      upRes.pipe(res)
+      return
+    }
+    // HTML：缓冲后注入。超过上限则原样透传（已收字节未改动，content-length 仍有效）
+    const chunks = []
+    let size = 0, passthrough = false
+    upRes.on('data', (c) => {
+      if (passthrough) { res.write(c); return }
+      chunks.push(c); size += c.length
+      if (size > HTML_LIMIT) {
+        passthrough = true
+        res.writeHead(upRes.statusCode || 502, h)
+        for (const pc of chunks) res.write(pc)
+        chunks.length = 0
+      }
+    })
+    upRes.on('end', () => {
+      if (passthrough) { res.end(); return }
+      const body = Buffer.from(injectHtml(Buffer.concat(chunks).toString('utf8')), 'utf8')
+      // 长度改变：清掉 hop-by-hop 头，重写 content-length（TE 与 CL 并存会被 fetch 拒绝）
+      delete h['transfer-encoding']
+      delete h['connection']
+      delete h['keep-alive']
+      h['content-length'] = String(body.length)
+      h['cache-control'] = 'no-store'
+      res.writeHead(upRes.statusCode || 502, h)
+      res.end(body)
+    })
+    upRes.on('error', () => { try { res.end() } catch { } })
+  })
+  upstream.on('error', () => {
+    try {
+      if (!res.headersSent) res.writeHead(502, { 'Content-Type': 'text/plain; charset=utf-8' })
+      res.end('Bad Gateway: DSH Web UI 不可达，请确认 dsh web 已启动')
+    } catch { }
+  })
+  res.on('close', () => { try { upstream.destroy() } catch { } })
+  req.pipe(upstream)
+}
+
+// ---- 认证 ------------------------------------------------------------------------
+function authed(req) {
+  return tokenEq(parseCookies(req)[COOKIE_NAME], TOKEN)
+}
+
+// ---- server ----------------------------------------------------------------------
+const server = http.createServer((req, res) => {
+  // 首次登录：?t=<token> → 种 Cookie 并跳回干净 URL
+  const ticket = queryTicket(req.url)
+  if (ticket !== undefined) {
+    if (failLimited()) { sendPage(res, 429, LIMITED_PAGE); return }
+    if (!tokenEq(ticket, TOKEN)) { noteFail(); sendPage(res, 403, DENY_PAGE); return }
+    const secure = req.headers['x-forwarded-proto'] === 'https' ? '; Secure' : ''
+    res.writeHead(302, {
+      'Location': '/',
+      'Set-Cookie': COOKIE_NAME + '=' + TOKEN + '; Path=/; HttpOnly; SameSite=Lax; Max-Age=31536000' + secure,
+      'Cache-Control': 'no-store',
+    })
+    res.end('')
+    return
+  }
+  // /pwa/* 静态资产豁免认证：iOS「添加到主屏幕」抓取 apple-touch-icon/manifest 时
+  // 不带会话 Cookie，若拦在 401 会导致主屏图标丢失。这些只是图标和清单，无敏感信息。
+  if (req.url.startsWith('/pwa/')) { servePwa(req, res); return }
+  if (!authed(req)) { sendPage(res, 401, UNAUTH_PAGE); return }
+  forward(req, res)
+})
+
+// WebSocket 隧道：同样的头清洗，裸 TCP 双通
+server.on('upgrade', (req, socket, head) => {
+  if (!authed(req)) {
+    try { socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n') } catch { }
+    return
+  }
+  const headers = cleanHeaders(req)
+  headers['connection'] = 'Upgrade'
+  headers['upgrade'] = req.headers.upgrade || 'websocket'
+  const upstream = net.connect(TARGET_PORT, TARGET_HOST, () => {
+    let raw = req.method + ' ' + req.url + ' HTTP/1.1\r\n'
+    for (const k in headers) {
+      const v = headers[k]
+      if (Array.isArray(v)) { for (const it of v) raw += k + ': ' + it + '\r\n' }
+      else raw += k + ': ' + v + '\r\n'
+    }
+    raw += '\r\n'
+    try {
+      upstream.write(raw)
+      if (head && head.length) upstream.write(head)
+      socket.pipe(upstream)
+      upstream.pipe(socket)
+    } catch { kill() }
+  })
+  const kill = () => { try { socket.destroy() } catch { } try { upstream.destroy() } catch { } }
+  socket.on('error', kill); upstream.on('error', kill)
+  socket.on('close', kill); upstream.on('close', kill)
+})
+
+server.listen(PORT, '127.0.0.1', () => {
+  console.log(`[dsh-mobile-mini] listening on 127.0.0.1:${PORT} -> ${TARGET_HOST}:${TARGET_PORT}`)
+  console.log(`[dsh-mobile-mini] 首次登录链接（token 见 config.json）:`)
+  console.log(`[dsh-mobile-mini]   https://<你的域名>/?t=${TOKEN}`)
+})

@@ -1,0 +1,17 @@
+{
+  "name": "dsh-remote-gate",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Minimal secure gateway for accessing a local DeepSeek Harness Web UI from a phone (token auth reverse proxy + PWA manifest injection).",
+  "license": "MIT",
+  "type": "module",
+  "main": "gateway.mjs",
+  "scripts": {
+    "start": "node start.mjs",
+    "start:gateway-only": "node gateway.mjs",
+    "test": "node --test \"test/*.test.mjs\""
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

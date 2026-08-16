@@ -1,0 +1,23 @@
+# frpc 配置模板 —— 复制为 frpc.toml 并填入你的服务器信息（frpc.toml 已 gitignore）
+# 文档：https://gofrp.org/zh-cn/docs/
+
+serverAddr = "<你的 frps 服务器地址>"
+serverPort = 7000
+
+auth.method = "token"
+auth.token = "<frps 的 auth.token>"
+
+transport.dialServerTimeout = 10
+transport.dialServerKeepalive = 7200
+
+# 预建工作连接池：移动端加载 SPA 时并发几十个连接，默认池太小会刷
+# "work connection pool is full" 并拖慢页面。frps 端的 transport.maxPoolCount
+# （默认 5）需同步调大，否则超出部分仍会被服务器丢弃。
+transport.poolCount = 20
+
+[[proxies]]
+name = "dsh-mobile"
+type = "tcp"
+localIP = "127.0.0.1"
+localPort = 3088
+remotePort = 3088

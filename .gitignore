@@ -1,0 +1,5 @@
+config.json
+node_modules/
+frp/frpc.exe
+frp/frpc.toml
+.dsh-usage-stats.json
