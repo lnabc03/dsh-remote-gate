@@ -33,16 +33,16 @@
 
 ## 密钥纪律
 
-`config.json`（网关令牌）、`frp/frpc.toml`（frp token）、`.dsh-usage-stats.json` 都在 `.gitignore`，任何改动不得把它们带入暂存区。README 与示例文件只写占位符，不写真实域名/IP/token。
+`config.json`（网关令牌）、`frp/frpc.toml`（frp token）、`.dsh-usage-stats.json` 都在 `.gitignore`，任何改动不得把它们带入暂存区。README 与示例文件只写占位符，不写真实域名/IP/token。ssh 模式的私钥本体在用户 `~/.ssh/` 下（`config.json` 只存 `ssh.keyPath` 路径），不进仓库、无需 gitignore。
 
 ## 隧道拓扑要点
 
 - 网关只绑 127.0.0.1，公网入口 = 服务器反代（TLS 终止 + `X-Forwarded-Proto: https`，后者决定 Cookie 是否加 `Secure`）；两种隧道都把服务器 `127.0.0.1:3088` 回灌到本机 gateway，反代侧无感知
 - **frp**：frps 端 `transport.maxPoolCount` 必须与 frpc 端 `transport.poolCount`（当前 20）对齐，否则刷 `work connection pool is full`（移动端加载 SPA 并发几十个连接所致）
-- **ssh**：服务器需 sshd + `AllowTcpForwarding yes`，无需 `GatewayPorts`（反向隧道默认只绑 loopback）；`remotePort` 固定 3088；私钥公钥需预先加入 `authorized_keys`，首次连接前先手动 `ssh` 一次录入 known_hosts
+- **ssh**：服务器需 sshd + `AllowTcpForwarding yes`，无需 `GatewayPorts`（反向隧道默认只绑 loopback）；`remotePort` 固定 3088；私钥公钥需预先加入 `authorized_keys`，首次连接前先手动 `ssh` 一次录入 known_hosts。已实现 + 单测覆盖（校验/参数构造/结果分类），真实端到端（服务器 sshd + authorized_keys + known_hosts 全链路）尚未实测
 
 ## v2 待办（用户已明确推迟，别主动做）
 
 - 任务完成 Web Push（iPhone 走标准 Web Push，用 `web-push` 库做 VAPID + 加密；参考实现 dsh-mobile-pwa 的推送链路是死代码，**不可照抄**：未加密未签名、订阅存内存、hook 名是猜的）
 - 「任务完成」检测需先查 dsh 真实的 turn-end 事件名，写迷你 cordis 插件 POST 给网关
-- 多机路由：按电脑分子域名 + frpc 配置模板化（frps 不允许两个代理共用 remotePort；frp 负载均衡组会在多机间随机分发，会话状态是各机本地的，不可用）
+- 多机路由：按电脑分子域名 + 隧道（frp/ssh）配置模板化（frps 不允许两个代理共用 remotePort，ssh 反向隧道同理每个 remotePort 只能被一条连接占用；会话状态是各机本地的，不可用）
