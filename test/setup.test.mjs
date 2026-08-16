@@ -8,12 +8,20 @@ import {
   validateToken,
   normalizeDomain,
   validateDomain,
+  normalizeMode,
+  validateMode,
+  validateSshUser,
+  validateSshKeyPath,
+  defaultSshKeyPath,
   tomlString,
   readFrpcConfig,
   renderFrpcToml,
   readConfigJson,
   mergeDomain,
   frpcBinaryName,
+  buildSshReverseArgs,
+  buildSshProbeArgs,
+  analyzeSshResult,
 } from '../setup.mjs'
 
 test('parseArgs：解析所有标志', () => {
@@ -31,8 +39,17 @@ test('parseArgs：-h 与未知标志', () => {
   assert.equal(flags.help, true)
 })
 
+test('parseArgs：解析 ssh 模式标志', () => {
+  const flags = parseArgs(['--mode', 'ssh', '--ssh-host', '203.0.113.10', '--ssh-port', '2222', '--ssh-user', 'deploy', '--ssh-key', 'C:\\k\\id'])
+  assert.equal(flags.mode, 'ssh')
+  assert.equal(flags.sshHost, '203.0.113.10')
+  assert.equal(flags.sshPort, '2222')
+  assert.equal(flags.sshUser, 'deploy')
+  assert.equal(flags.sshKey, 'C:\\k\\id')
+})
+
 test('validateServer / validatePort / validateToken', () => {
-  assert.equal(validateServer('8.135.34.161'), null)
+  assert.equal(validateServer('203.0.113.10'), null)
   assert.equal(validateServer('dsh.example.com'), null)
   assert.ok(validateServer(''))
   assert.ok(validateServer('a b'))
@@ -65,7 +82,7 @@ test('tomlString 转义', () => {
 })
 
 test('renderFrpcToml → readFrpcConfig 往返无损', () => {
-  const values = { serverAddr: '8.135.34.161', serverPort: 7000, authToken: 'd9fd-TOKEN' }
+  const values = { serverAddr: '203.0.113.10', serverPort: 7000, authToken: 'd9fd-TOKEN' }
   const rendered = renderFrpcToml(values)
   const parsed = readFrpcConfig(rendered)
   assert.equal(parsed.serverAddr, values.serverAddr)
@@ -89,7 +106,7 @@ test('renderFrpcToml 固定默认值存在', () => {
 
 test('readFrpcConfig 解析真实格式 frpc.toml', () => {
   const text = [
-    'serverAddr = "8.135.34.161"',
+    'serverAddr = "203.0.113.10"',
     'serverPort = 7000',
     'auth.method = "token"',
     'auth.token = "deadbeef"',
@@ -100,7 +117,7 @@ test('readFrpcConfig 解析真实格式 frpc.toml', () => {
     'remotePort = 3088',
   ].join('\n')
   const parsed = readFrpcConfig(text)
-  assert.equal(parsed.serverAddr, '8.135.34.161')
+  assert.equal(parsed.serverAddr, '203.0.113.10')
   assert.equal(parsed.serverPort, 7000)
   assert.equal(parsed.authToken, 'deadbeef')
 })
@@ -117,4 +134,62 @@ test('frpcBinaryName 按平台', () => {
   assert.equal(frpcBinaryName('win32'), 'frpc.exe')
   assert.equal(frpcBinaryName('linux'), 'frpc')
   assert.equal(frpcBinaryName('darwin'), 'frpc')
+})
+
+test('validateMode / normalizeMode', () => {
+  assert.equal(validateMode('frp'), null)
+  assert.equal(validateMode('SSH'), null)
+  assert.equal(normalizeMode('  Ssh '), 'ssh')
+  assert.ok(validateMode('ftp'))
+  assert.ok(validateMode(''))
+})
+
+test('validateSshUser / validateSshKeyPath', () => {
+  assert.equal(validateSshUser('deploy'), null)
+  assert.ok(validateSshUser(''))
+  assert.ok(validateSshUser('a b'))
+  assert.ok(validateSshUser('a@b'))
+  assert.ok(validateSshUser('a:b'))
+  assert.equal(validateSshKeyPath('C:\\k\\id'), null)
+  assert.ok(validateSshKeyPath(''))
+})
+
+test('defaultSshKeyPath 指向家目录 id_ed25519', () => {
+  const p = defaultSshKeyPath()
+  assert.ok(p.endsWith('id_ed25519'))
+  assert.ok(p.includes('.ssh'))
+})
+
+test('buildSshReverseArgs 参数完整且顺序正确', () => {
+  const args = buildSshReverseArgs({ host: '203.0.113.10', port: 22, user: 'deploy', keyPath: '/k/id' })
+  assert.ok(args.includes('-N') && args.includes('-T'))
+  assert.ok(args.includes('-R'))
+  assert.ok(args.includes('3088:127.0.0.1:3088'))
+  assert.ok(args.includes('-i'))
+  assert.ok(args.includes('/k/id'))
+  assert.ok(args.includes('-p'))
+  assert.ok(args.includes('22'))
+  assert.ok(args.includes('deploy@203.0.113.10'))
+  // 选项必须在目的地址之前
+  assert.ok(args.indexOf('deploy@203.0.113.10') === args.length - 1)
+  const joined = args.join(' ')
+  assert.ok(joined.includes('StrictHostKeyChecking=yes'))
+  assert.ok(joined.includes('BatchMode=yes'))
+  assert.ok(joined.includes('ExitOnForwardFailure=yes'))
+  assert.ok(joined.includes('ServerAliveInterval=15'))
+})
+
+test('buildSshProbeArgs 以远程 true 收尾', () => {
+  const args = buildSshProbeArgs({ host: 'h', port: 22, user: 'u', keyPath: '/k' })
+  assert.equal(args[args.length - 1], 'true')
+  assert.equal(args[args.length - 2], 'u@h')
+})
+
+test('analyzeSshResult 分类各失败场景', () => {
+  assert.equal(analyzeSshResult({ status: 0 }).status, 'ok')
+  assert.equal(analyzeSshResult({ status: 255, spawnError: 'spawn ssh ENOENT' }).status, 'ssh-not-found')
+  assert.equal(analyzeSshResult({ status: 255, stderr: 'Host key verification failed.' }).status, 'host-key-unverified')
+  assert.equal(analyzeSshResult({ status: 255, stderr: 'deploy@h: Permission denied (publickey).' }).status, 'auth-failed')
+  assert.equal(analyzeSshResult({ status: 255, stderr: 'ssh: connect to host h port 22: Connection refused' }).status, 'unreachable')
+  assert.equal(analyzeSshResult({ status: 1, stderr: 'something else' }).status, 'failed')
 })

@@ -1,6 +1,6 @@
 # dsh-remote-gate
 
-> 最小化的 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（DSH）远程访问网关：手机/平板经公网服务器（frp 中转）安全操控本机的 DSH Web UI，可安装为 PWA。
+> 最小化的 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（DSH）远程访问网关：手机/平板经公网服务器（frp 或 SSH 反向隧道中转）安全操控本机的 DSH Web UI，可安装为 PWA。
 
 单文件、零依赖（Node ≥ 18），只做三件事：**令牌认证 · 反向代理（含 WebSocket）· PWA manifest 注入**。
 
@@ -15,29 +15,30 @@
 ## 架构
 
 ```
-手机/平板 ──HTTPS──> 公网服务器（反代 TLS 终止）──frp──> 本机 127.0.0.1:3088（本网关）──> 127.0.0.1:3080（DSH Web UI）
+手机/平板 ──HTTPS──> 公网服务器（反代 TLS 终止）──隧道（frp 或 SSH 反向）──> 本机 127.0.0.1:3088（本网关）──> 127.0.0.1:3080（DSH Web UI）
 ```
 
-- 网关只绑定 `127.0.0.1`，唯一入口是本地 frpc，无公网暴露面
-- 认证为「共享令牌 + 每设备 Cookie」，无任何 IP 相关逻辑——经 frp 后所有来源都是 127.0.0.1，基于 IP 的审批/限流在这种拓扑下必然失效（这也是重写 [dsh-mobile-pwa](https://github.com/zylzyqzz/dsh-mobile-pwa) 的原因）
+- 网关只绑定 `127.0.0.1`，唯一入口是本地 frpc 或 ssh 反向隧道，无公网暴露面
+- 认证为「共享令牌 + 每设备 Cookie」，无任何 IP 相关逻辑——经 frp/ssh 后所有来源都是 127.0.0.1，基于 IP 的审批/限流在这种拓扑下必然失效（这也是重写 [dsh-mobile-pwa](https://github.com/zylzyqzz/dsh-mobile-pwa) 的原因）
 
 ## 快速开始
 
 ```bash
 git clone <repo> && cd dsh-remote-gate
 
-# 1. 放入 frpc：从 https://github.com/fatedier/frp/releases 下载对应平台 release，
-#    把 frpc 可执行文件放进 frp/ 目录
-# 2. 一键启动（Windows 可直接双击 start.bat）；首次运行会交互式询问 frp 配置
+# 一键启动（Windows 可直接双击 start.bat）；首次运行会交互式询问「隧道模式 + 对应字段」
 npm start
 ```
 
-`npm start`（即 `start.mjs`）首次运行会交互式询问 4 项——frps 服务器地址、端口（默认 7000）、认证 token、公网域名——写入 `frp/frpc.toml` 与 `config.json`，然后单窗口拉起三个进程，日志带 `[dsh]` / `[gate]` / `[frpc]` 前缀：
+`npm start`（即 `start.mjs`）首次运行先问**隧道模式**（`frp` 或 `ssh`），再问对应字段，写入 `config.json`（frp 模式额外写 `frp/frpc.toml`），然后单窗口拉起三个进程，日志带 `[dsh]` / `[gate]` / `[frpc]` 或 `[ssh]` 前缀：
 
 - 先探测 3080：dsh web 已在运行则跳过，否则直接 `spawn(node, [全局 dsh 的 bin.js, 'web'])`（不经过 npx/shell，避免关窗口残留孤儿进程）；崩溃自动重启（5 次 × 3s）
-- 再启动网关与 frpc 隧道；任一关键进程退出则整体退出；Ctrl+C 全部终止
+- 再启动网关与隧道；网关/frpc 退出则整体退出；ssh 隧道退出则自动重拨（不团灭）；Ctrl+C 全部终止
 
-已配置后每次启动都会跳过提问；`npm start -- --setup` 重新配置（现有值作默认，回车保留）。也支持命令行标志：`--server`、`--server-port`、`--auth-token`、`--domain`（`--help` 查看全部）。
+- **frp 模式**：需先下载 frpc（见下），问 frps 地址/端口（默认 7000）/token/域名
+- **ssh 模式**：无需下载任何二进制（用系统自带 OpenSSH），问服务器地址/端口（默认 22）/用户名/私钥路径（默认 `~/.ssh/id_ed25519`）/域名
+
+已配置后每次启动都会跳过提问；`npm start -- --setup` 重新配置（现有值作默认，回车保留）；`--mode frp|ssh` 切换模式。也支持命令行标志：`--server`、`--server-port`、`--auth-token`、`--ssh-host`、`--ssh-port`、`--ssh-user`、`--ssh-key`、`--domain`（`--help` 查看全部）。
 
 网关首次运行生成随机访问令牌写入 `config.json`，启动日志会打印登录链接：
 
@@ -49,8 +50,11 @@ https://<你的域名>/?t=<token>
 
 ### 服务器侧
 
-1. frps 的 `frps.toml` 加 `transport.maxPoolCount = 20`（与 frpc 的 `poolCount` 对齐，否则刷 `work connection pool is full`）
-2. 反代（Nginx/Caddy）把域名 HTTPS 流量转到 frps 暴露的端口，并带上 `X-Forwarded-Proto: https` 头（用于给 Cookie 加 `Secure`）
+反代（Nginx/Caddy）把域名 HTTPS 流量转到隧道暴露的端口，并带上 `X-Forwarded-Proto: https` 头（用于给 Cookie 加 `Secure`）。
+
+**frp 模式**：frps 的 `frps.toml` 加 `transport.maxPoolCount = 20`（与 frpc 的 `poolCount` 对齐，否则刷 `work connection pool is full`）；反代转到的就是 frps 暴露的 `remotePort`（默认 3088）。
+
+**ssh 模式**：服务器需已运行 sshd、账号可用、`sshd_config` 里 `AllowTcpForwarding yes`（反向隧道默认只绑 127.0.0.1，无需 `GatewayPorts`）；本机私钥对应的公钥要加入该账号的 `~/.ssh/authorized_keys`；首次连接前先在命令行手动 `ssh <用户>@<服务器>` 一次录入主机指纹。反代转到的就是 ssh 反向隧道绑定的 `127.0.0.1:3088`。
 
 ### 手机安装为 PWA
 
@@ -67,6 +71,8 @@ https://<你的域名>/?t=<token>
 | env | `DSH_GATE_TOKEN` | — | 访问令牌（设置后不再读写 config.json） |
 | env | `DSH_GATE_DOMAIN` | — | 公网域名，打印登录链接用（`config.json` 的 `domain` 同效） |
 | `config.json` | `token` / `port` / `targetPort` / `domain` | — | 同上，文件形式；`domain` 由 setup 写入 |
+| `config.json` | `mode` | `frp` | 隧道模式：`frp` 或 `ssh`（缺省 frp，向后兼容） |
+| `config.json` | `ssh.host` / `ssh.port` / `ssh.user` / `ssh.keyPath` | — | ssh 模式专用：服务器地址 / 端口（默认 22）/ 用户名 / 私钥路径 |
 
 ## 安全模型
 
@@ -85,8 +91,8 @@ npm test   # 起 mock 上游 + 网关子进程：认证/头清洗/HTML 注入顺
 | 路径 | 作用 |
 | --- | --- |
 | `gateway.mjs` | 网关本体：令牌认证 + 反代 + WS 隧道 + manifest 注入 |
-| `start.mjs` / `start.bat` | 一键启动（dsh web + 网关 + frpc，单窗口） |
-| `setup.mjs` | 首次运行交互式配置（frp 隧道 + 公网域名） |
+| `start.mjs` / `start.bat` | 一键启动（dsh web + 网关 + frp/ssh 隧道，单窗口） |
+| `setup.mjs` | 首次运行交互式配置（隧道模式 frp/ssh + 公网域名 + SSH 连通性自检） |
 | `patch-dsh.mjs` | 幂等补丁 DSH client-runtime（修复提问弹窗被重连刷没） |
 | `pwa/` | manifest.json、最小 service worker、图标（dsh 官方鲸鱼 logo） |
 | `frp/frpc.toml.example` | frp 客户端配置模板 |

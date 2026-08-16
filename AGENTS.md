@@ -1,6 +1,6 @@
 # CLAUDE.md — dsh-remote-gate
 
-最小化 DSH（DeepSeek Harness）远程访问网关：手机/平板经公网服务器（frp 中转）安全操控本机 DSH Web UI，可安装为 PWA。私有仓库，计划完善后转公开。
+最小化 DSH（DeepSeek Harness）远程访问网关：手机/平板经公网服务器（frp 或 SSH 反向隧道中转）安全操控本机 DSH Web UI，可安装为 PWA。私有仓库，计划完善后转公开。
 
 ## 技术栈与形态
 
@@ -17,14 +17,15 @@
 4. **`/pwa/*` 静态资产豁免认证**。iOS「添加到主屏幕」抓图标/manifest 不带会话 Cookie，拦 401 会丢图标。仅限这个前缀下的白名单文件，路径穿越防护不可删；未来 `/pwa/push/*` 这类动态端点必须另行鉴权，不能跟着豁免。
 5. 注入改写响应体时，必须删掉 `Transfer-Encoding`/`Connection`/`Keep-Alive` 并重写 `Content-Length`——TE 与 CL 并存会被浏览器 fetch 拒收（踩过）。前提是把 `Accept-Encoding` 摘掉让上游返回未压缩内容，压缩字节不可注入。
 6. **dsh 必须由 `start.mjs` 直接 `spawn(node, [dshBin, 'web'])` 启动，绝不能走 `npx`/`shell` 中转**。Windows 点窗口 X 关控制台发的是 `CTRL_CLOSE_EVENT`，Node 不触发 `SIGINT`/`SIGTERM`，`shutdown()` 里的 `taskkill /T` 根本不执行；`npx → cmd → dsh web` 深层进程脱离控制台成为孤儿（下次 `probeDsh` 复用残留，补丁/改动都不生效）。直接子进程则随控制台一起退出，Ctrl+C 的 `taskkill /T` 也少两层中间进程、杀得更干净。
+7. **ssh 反向隧道**：`ssh -R 3088:127.0.0.1:3088`，`remotePort` 固定 3088（服务器反代硬编码指向它，别改）。认证只用密钥（复用已有私钥，`-i` 指定路径），`BatchMode=yes` 拒绝密码交互；`StrictHostKeyChecking=yes`（预先录入 known_hosts，否则拒连——防中间人），**绝不放宽成 `accept-new`/`no`**。重连在 Node 内手写（退出 3s 重拨、不团灭），**不要引入 autossh**（零依赖约束）。ssh 进程非致命、frpc 致命：别把 ssh 的退出语义与 frpc 的「退出=团灭」混同。
 
 ## 文件与职责
 
 | 路径 | 职责 | 改动注意 |
 | --- | --- | --- |
 | `gateway.mjs` | 令牌认证 + 反代 + WS 隧道 + manifest 注入 | 改完必跑 `npm test` |
-| `start.mjs` | 拉起 dsh web + 网关 + frpc，单窗口日志加前缀 | dsh 崩溃自动重启；网关/frpc 退出则团灭；dsh 直接 spawn node bin.js（见约束 6），杀派生树用 `taskkill /T` |
-| `setup.mjs` | 首次运行交互式配置（frp 隧道 + 公网域名） | 全量重写 `frpc.toml`；改校验/渲染必跑 `npm test` |
+| `start.mjs` | 拉起 dsh web + 网关 + 隧道（frp/ssh），单窗口日志加前缀 | dsh 崩溃自动重启；网关/frpc 退出则团灭，ssh 退出则 3s 重拨（不团灭，见约束 7）；dsh 直接 spawn node bin.js（见约束 6），杀派生树用 `taskkill /T` |
+| `setup.mjs` | 首次运行交互式配置（隧道模式 frp/ssh + 公网域名 + SSH 连通性自检） | frp 全量重写 `frpc.toml`；ssh 写 `config.json` 的 `mode`/`ssh.*`；改校验/渲染/ssh 参数必跑 `npm test` |
 | `patch-dsh.mjs` | 幂等补丁 DSH client-runtime（修复提问弹窗被重连刷没） | 锚点严格 LF + Tab；改锚点先跑 `npm test` |
 | `pwa/sw.js` | 最小 SW，只为满足 Chrome 可安装性；**不做缓存**（下拉误刷新类 bug 的教训），v2 推送的 push 事件也加在这里 | |
 | `pwa/icons/` | dsh 官方鲸鱼 logo（白底黑鲸，maskable 版缩到 68% 保安全区） | 源文件是 dsh 的 `/favicon.svg` |
@@ -34,10 +35,11 @@
 
 `config.json`（网关令牌）、`frp/frpc.toml`（frp token）、`.dsh-usage-stats.json` 都在 `.gitignore`，任何改动不得把它们带入暂存区。README 与示例文件只写占位符，不写真实域名/IP/token。
 
-## frp 拓扑要点
+## 隧道拓扑要点
 
-- frps 端 `transport.maxPoolCount` 必须与 frpc 端 `transport.poolCount`（当前 20）对齐，否则刷 `work connection pool is full`（移动端加载 SPA 并发几十个连接所致）
-- 网关只绑 127.0.0.1，公网入口 = 服务器反代（TLS 终止 + `X-Forwarded-Proto: https`，后者决定 Cookie 是否加 `Secure`）
+- 网关只绑 127.0.0.1，公网入口 = 服务器反代（TLS 终止 + `X-Forwarded-Proto: https`，后者决定 Cookie 是否加 `Secure`）；两种隧道都把服务器 `127.0.0.1:3088` 回灌到本机 gateway，反代侧无感知
+- **frp**：frps 端 `transport.maxPoolCount` 必须与 frpc 端 `transport.poolCount`（当前 20）对齐，否则刷 `work connection pool is full`（移动端加载 SPA 并发几十个连接所致）
+- **ssh**：服务器需 sshd + `AllowTcpForwarding yes`，无需 `GatewayPorts`（反向隧道默认只绑 loopback）；`remotePort` 固定 3088；私钥公钥需预先加入 `authorized_keys`，首次连接前先手动 `ssh` 一次录入 known_hosts
 
 ## v2 待办（用户已明确推迟，别主动做）
 

@@ -1,16 +1,17 @@
-// dsh-mobile-mini 一键启动：dsh web + 网关 + frpc 隧道，全部收进当前窗口
+// dsh-mobile-mini 一键启动：dsh web + 网关 + 隧道（frp 或 ssh 反向隧道），全部收进当前窗口
 //
 // 策略：
 //   - dsh web：启动前先探 3080，已在运行则跳过；崩溃后自动重启（最多 5 次，间隔 3s）
-//   - 网关 / frpc：任一退出则整体退出（隧道断了网关不能裸跑）
-//   - Ctrl+C 同时终止全部（Windows 下对 npx 派生树用 taskkill /T）
+//   - 网关：退出则整体退出；frpc：退出则整体退出（隧道断了网关不能裸跑）
+//   - ssh 反向隧道：非致命，退出后自动重拨（弱网/服务器重启不断链）
+//   - Ctrl+C 同时终止全部（Windows 下对派生树用 taskkill /T）
 
 import { spawn, execFile, execSync } from 'node:child_process'
 import path from 'node:path'
 import fs from 'node:fs'
 import http from 'node:http'
 import { fileURLToPath } from 'node:url'
-import { ensureConfigured, frpcBinaryName } from './setup.mjs'
+import { ensureConfigured, frpcBinaryName, buildSshReverseArgs, readConfigJson, defaultSshKeyPath } from './setup.mjs'
 import { patchDsh } from './patch-dsh.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -123,8 +124,44 @@ function startVital({ tag, cmd, args }) {
   })
 }
 
+// ssh 反向隧道：非致命进程，退出后 3s 自动重拨；连续快速失败给提示但不团灭。
+const SSH_RECONNECT_MS = 3000
+function startSsh(sshCfg, retryCount = 0) {
+  if (!sshCfg || !sshCfg.host || !sshCfg.user) {
+    console.error('[start] SSH 配置不完整，无法启动隧道；请运行 npm start -- --setup 重新配置')
+    shutdown(1)
+    return
+  }
+  const args = buildSshReverseArgs({
+    host: sshCfg.host,
+    port: sshCfg.port ?? 22,
+    user: sshCfg.user,
+    keyPath: sshCfg.keyPath ?? defaultSshKeyPath(),
+    remotePort: 3088,
+    localPort: 3088,
+  })
+  const startedAt = Date.now()
+  const p = spawn('ssh', args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
+  attach(p, 'ssh')
+  p.on('error', (err) => {
+    console.error(`[start] ssh 启动失败: ${err.message}（请确认系统已安装 OpenSSH 客户端）`)
+    shutdown(1)
+  })
+  p.on('exit', (code, signal) => {
+    if (shuttingDown) return
+    const fast = Date.now() - startedAt < 5000
+    const next = fast ? retryCount + 1 : 0
+    if (next === 3) {
+      console.log('[start] ssh 连续快速断开，疑似认证/主机指纹/网络问题；仍会继续重连')
+      console.log('[start]   私钥/用户名见 config.json 的 ssh 字段；首次连接需先手动 ssh 一次录入主机指纹')
+    }
+    console.log(`[start] ssh 隧道断开 (code=${code} signal=${signal})，${SSH_RECONNECT_MS / 1000}s 后重连`)
+    setTimeout(() => { if (!shuttingDown) startSsh(sshCfg, next) }, SSH_RECONNECT_MS).unref()
+  })
+}
+
 async function main() {
-  // 1) 首次运行交互式配置（frp 隧道 + 公网域名）；frpc 缺失时退出并提示下载
+  // 1) 首次运行交互式配置（隧道模式 frp/ssh + 公网域名）；frpc/ssh 缺失或自检失败时退出并提示
   const setup = await ensureConfigured(process.argv.slice(2))
   if (setup.action === 'exit') process.exit(setup.code)
   if (setup.action === 'configured') console.log('')
@@ -157,7 +194,17 @@ async function main() {
     }
   }
   startVital({ tag: 'gate', cmd: process.execPath, args: [path.join(__dirname, 'gateway.mjs')] })
-  startVital({ tag: 'frpc', cmd: path.join(__dirname, 'frp', frpcBinaryName()), args: ['-c', path.join(__dirname, 'frp', 'frpc.toml')] })
+
+  // 隧道：frp（致命，退出团灭）或 ssh 反向隧道（非致命，退出自动重拨）
+  let cfg = {}
+  try { cfg = readConfigJson(fs.readFileSync(path.join(__dirname, 'config.json'), 'utf8')) } catch { /* 无配置则默认 frp */ }
+  if (cfg.mode === 'ssh') {
+    console.log('[start] 隧道模式：ssh 反向隧道')
+    startSsh(cfg.ssh || {})
+  } else {
+    console.log('[start] 隧道模式：frp')
+    startVital({ tag: 'frpc', cmd: path.join(__dirname, 'frp', frpcBinaryName()), args: ['-c', path.join(__dirname, 'frp', 'frpc.toml')] })
+  }
 }
 
 const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)
