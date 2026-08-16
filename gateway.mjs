@@ -5,14 +5,17 @@
 //   3. HTML 注入 manifest/meta，让手机可以「添加到主屏」
 //
 // 运行：node gateway.mjs
-// 配置：同目录 config.json（首次运行自动生成随机 token），或环境变量覆盖：
-//   DSH_GATE_PORT         监听端口（默认 3088，只绑 127.0.0.1）
+// 配置：config.json（首次运行自动生成随机 token），或环境变量覆盖：
+//   DSH_GATE_CONFIG       配置文件路径（默认同目录 config.json；测试/多实例用）
+//   DSH_GATE_PORT         监听端口（默认 3088）
+//   DSH_GATE_BIND         监听地址（默认按 config.json.mode：lan → 0.0.0.0，其余 → 127.0.0.1）
 //   DSH_GATE_TARGET_PORT  DSH Web UI 端口（默认 3080）
 //   DSH_GATE_TOKEN        访问令牌（设置后不再读写 config.json）
-//   DSH_GATE_DOMAIN       公网域名（用于打印登录链接，如 dsh.example.com）
+//   DSH_GATE_DOMAIN       公网域名（用于打印登录链接，如 dsh.example.com；lan 模式忽略）
 
 import http from 'node:http'
 import net from 'node:net'
+import os from 'node:os'
 import fs from 'node:fs'
 import path from 'node:path'
 import crypto from 'node:crypto'
@@ -21,7 +24,7 @@ import { fileURLToPath } from 'node:url'
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
 // ---- config ---------------------------------------------------------------
-const CONFIG_PATH = path.join(__dirname, 'config.json')
+const CONFIG_PATH = process.env.DSH_GATE_CONFIG || path.join(__dirname, 'config.json')
 let fileCfg = {}
 try { fileCfg = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8')) } catch { /* first run */ }
 
@@ -35,6 +38,7 @@ const PORT = Number(process.env.DSH_GATE_PORT || fileCfg.port || 3088)
 const TARGET_HOST = '127.0.0.1'
 const TARGET_PORT = Number(process.env.DSH_GATE_TARGET_PORT || fileCfg.targetPort || 3080)
 const DOMAIN = process.env.DSH_GATE_DOMAIN || fileCfg.domain || ''
+const BIND_HOST = process.env.DSH_GATE_BIND || (fileCfg.mode === 'lan' ? '0.0.0.0' : '127.0.0.1')
 const COOKIE_NAME = 'dg_token'
 const HTML_LIMIT = 4 * 1024 * 1024
 
@@ -67,6 +71,17 @@ function queryTicket(url) {
 
 function esc(s) {
   return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+}
+
+// 探测一个非回环 IPv4 用于打印局域网登录链接（仅展示，不参与绑定决策）
+function lanIp() {
+  const ifaces = os.networkInterfaces()
+  for (const name of Object.keys(ifaces)) {
+    for (const iface of ifaces[name] || []) {
+      if (!iface.internal && (iface.family === 'IPv4' || iface.family === 4)) return iface.address
+    }
+  }
+  return undefined
 }
 
 // 转发到 dsh 的头白名单：抹掉一切能暴露「非本机访问」的痕迹
@@ -288,8 +303,13 @@ server.on('upgrade', (req, socket, head) => {
   socket.on('close', kill); upstream.on('close', kill)
 })
 
-server.listen(PORT, '127.0.0.1', () => {
-  console.log(`[dsh-mobile-mini] listening on 127.0.0.1:${PORT} -> ${TARGET_HOST}:${TARGET_PORT}`)
+server.listen(PORT, BIND_HOST, () => {
+  console.log(`[dsh-mobile-mini] listening on ${BIND_HOST}:${PORT} -> ${TARGET_HOST}:${TARGET_PORT}`)
   console.log(`[dsh-mobile-mini] 首次登录链接（token 见 config.json）:`)
-  console.log(`[dsh-mobile-mini]   https://${DOMAIN || '<你的域名>'}/?t=${TOKEN}`)
+  if (BIND_HOST === '0.0.0.0') {
+    const ip = lanIp()
+    console.log(`[dsh-mobile-mini]   http://${ip || '<本机局域网IP>'}:${PORT}/?t=${TOKEN}`)
+  } else {
+    console.log(`[dsh-mobile-mini]   https://${DOMAIN || '<你的域名>'}/?t=${TOKEN}`)
+  }
 })

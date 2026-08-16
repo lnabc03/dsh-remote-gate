@@ -2,6 +2,8 @@
 import { test, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import http from 'node:http'
+import fs from 'node:fs'
+import os from 'node:os'
 import { spawn } from 'node:child_process'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -147,4 +149,34 @@ test('/pwa 路径穿越被拒绝', async () => {
   const cookie = await loginCookie()
   const res = await fetch(base() + '/pwa/..%2Fgateway.mjs', { headers: { Cookie: cookie } })
   assert.equal(res.status, 404)
+})
+
+test('lan 模式：网关绑 0.0.0.0 并打印局域网登录链接', async () => {
+  const tmp = path.join(os.tmpdir(), 'dsh-gate-lan-' + Math.random().toString(36).slice(2) + '.json')
+  const lanPort = 31000 + Math.floor(Math.random() * 5000)
+  fs.writeFileSync(tmp, JSON.stringify({ mode: 'lan' }))
+  const gate = spawn(process.execPath, [GATEWAY], {
+    env: {
+      ...process.env,
+      DSH_GATE_CONFIG: tmp,
+      DSH_GATE_TOKEN: TOKEN,
+      DSH_GATE_PORT: String(lanPort),
+      DSH_GATE_TARGET_PORT: String(UP_PORT),
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  let out = ''
+  try {
+    await new Promise((resolve, reject) => {
+      gate.stdout.on('data', (d) => { out += d; if (out.includes('listening') && out.includes('http://')) resolve() })
+      gate.stderr.on('data', (d) => { out += d })
+      gate.on('exit', (code) => reject(new Error('gateway exited early: ' + code + '\n' + out)))
+      setTimeout(() => reject(new Error('gateway listen timeout\n' + out)), 8000)
+    })
+    assert.match(out, /listening on 0\.0\.0\.0:/)
+    assert.match(out, /http:\/\//)
+  } finally {
+    try { gate.kill() } catch { }
+    try { fs.unlinkSync(tmp) } catch { }
+  }
 })

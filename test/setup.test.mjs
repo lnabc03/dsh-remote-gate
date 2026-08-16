@@ -48,6 +48,11 @@ test('parseArgs：解析 ssh 模式标志', () => {
   assert.equal(flags.sshKey, 'C:\\k\\id')
 })
 
+test('parseArgs：解析 lan 模式标志', () => {
+  const flags = parseArgs(['--mode', 'lan'])
+  assert.equal(flags.mode, 'lan')
+})
+
 test('validateServer / validatePort / validateToken', () => {
   assert.equal(validateServer('203.0.113.10'), null)
   assert.equal(validateServer('dsh.example.com'), null)
@@ -139,7 +144,10 @@ test('frpcBinaryName 按平台', () => {
 test('validateMode / normalizeMode', () => {
   assert.equal(validateMode('frp'), null)
   assert.equal(validateMode('SSH'), null)
+  assert.equal(validateMode('lan'), null)
+  assert.equal(validateMode(' LAN '), null)
   assert.equal(normalizeMode('  Ssh '), 'ssh')
+  assert.equal(normalizeMode(' Lan '), 'lan')
   assert.ok(validateMode('ftp'))
   assert.ok(validateMode(''))
 })

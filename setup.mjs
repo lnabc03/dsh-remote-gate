@@ -1,4 +1,4 @@
-// setup.mjs — 首次运行交互式配置（隧道模式 frp/ssh + 公网域名）
+// setup.mjs — 首次运行交互式配置（访问模式 frp/ssh/lan；frp/ssh 含公网域名）
 // 纯函数（解析/校验/渲染/合并/ssh 参数构造/自检结果分析）可被 test/setup.test.mjs 单测；交互循环与连通性自检只在 ensureConfigured 内触发。
 // 由 start.mjs 在启动前调用；也可直接 node setup.mjs 单独跑。
 
@@ -84,8 +84,8 @@ export function normalizeMode(v) {
 
 export function validateMode(v) {
   const s = normalizeMode(v)
-  if (s === 'frp' || s === 'ssh') return null
-  return '隧道模式只能是 frp 或 ssh'
+  if (s === 'frp' || s === 'ssh' || s === 'lan') return null
+  return '访问模式只能是 frp、ssh 或 lan'
 }
 
 export function validateSshUser(v) {
@@ -260,8 +260,8 @@ function attachSshHint(result, { host, user }) {
 function printUsage() {
   console.log('用法：npm start [选项]')
   console.log('  --setup               强制进入交互式配置（即使已配置）')
-  console.log('  --mode <frp|ssh>      隧道模式（frp 或 ssh）')
-  console.log('  --domain <域名>       公网域名（如 dsh.example.com）')
+  console.log('  --mode <frp|ssh|lan>  访问模式（frp / ssh / lan）')
+  console.log('  --domain <域名>       公网域名（如 dsh.example.com；frp/ssh 模式）')
   console.log('  frp 模式：')
   console.log('  --server <地址>       frps 服务器地址')
   console.log('  --server-port <端口>  frps 服务器端口（默认 7000）')
@@ -271,9 +271,11 @@ function printUsage() {
   console.log('  --ssh-port <端口>     SSH 服务器端口（默认 22）')
   console.log('  --ssh-user <用户名>   SSH 用户名')
   console.log('  --ssh-key <路径>      SSH 私钥路径（默认 ~/.ssh/id_ed25519）')
+  console.log('  lan 模式：')
+  console.log('                       无隧道、无额外字段，网关直连局域网（绑 0.0.0.0）')
   console.log('  --help, -h            显示帮助')
   console.log('')
-  console.log('首次运行时若未配置（frp 缺 frpc.toml 或 ssh 缺字段）会自动进入交互式配置。')
+  console.log('首次运行时若未配置会自动进入交互式配置（lan 模式无前置条件，无需任何字段）。')
 }
 
 function promptField(rl, { label, defaultValue, required, validate, normalize }) {
@@ -370,7 +372,7 @@ export async function ensureConfigured(argv = [], io = {}) {
 
   const frpConfigured = frpcExists
   const sshConfigured = !!(existingSsh.host && existingSsh.user)
-  const modeChanged = flags.mode !== undefined && flags.mode !== existingCfg.mode
+  const modeChanged = flags.mode !== undefined && mode !== existingCfg.mode
   const needsSetup = flags.setup || modeChanged || (mode === 'frp' && !frpConfigured) || (mode === 'ssh' && !sshConfigured)
 
   if (!needsSetup) return { action: 'skip' }
@@ -386,7 +388,7 @@ export async function ensureConfigured(argv = [], io = {}) {
       console.log('首次配置 dsh-remote-gate：')
       console.log('')
       const picked = await promptField(ensureRl(), {
-        label: '隧道模式 (frp / ssh)', defaultValue: mode, required: true, validate: validateMode, normalize: normalizeMode,
+        label: '模式 (frp / ssh / lan)', defaultValue: mode, required: true, validate: validateMode, normalize: normalizeMode,
       })
       if (picked === undefined) {
         console.log('')
@@ -396,7 +398,7 @@ export async function ensureConfigured(argv = [], io = {}) {
       mode = picked
     }
 
-    // 该模式的字段集合
+    // 该模式的字段集合（lan 无隧道字段，也无需公网域名）
     const specs = mode === 'frp'
       ? [
           { key: 'serverAddr', flagName: '--server', flag: flags.server, label: 'frps 服务器地址', defaultValue: existingFrpc.serverAddr, required: true, validate: validateServer },
@@ -404,13 +406,15 @@ export async function ensureConfigured(argv = [], io = {}) {
           { key: 'authToken', flagName: '--auth-token', flag: flags.authToken, label: 'frps 认证 token', defaultValue: existingFrpc.authToken, required: true, validate: validateToken },
           { key: 'domain', flagName: '--domain', flag: flags.domain, label: '公网域名', defaultValue: existingCfg.domain, required: true, validate: validateDomain, normalize: normalizeDomain },
         ]
-      : [
-          { key: 'host', flagName: '--ssh-host', flag: flags.sshHost, label: 'SSH 服务器地址', defaultValue: existingSsh.host, required: true, validate: validateServer },
-          { key: 'port', flagName: '--ssh-port', flag: flags.sshPort, label: 'SSH 服务器端口', defaultValue: existingSsh.port ?? 22, required: true, validate: validatePort, coerce: (v) => Number(v) },
-          { key: 'user', flagName: '--ssh-user', flag: flags.sshUser, label: 'SSH 用户名', defaultValue: existingSsh.user ?? os.userInfo().username, required: true, validate: validateSshUser },
-          { key: 'keyPath', flagName: '--ssh-key', flag: flags.sshKey, label: 'SSH 私钥路径', defaultValue: existingSsh.keyPath ?? defaultSshKeyPath(), required: true, validate: validateSshKeyPath },
-          { key: 'domain', flagName: '--domain', flag: flags.domain, label: '公网域名', defaultValue: existingCfg.domain, required: true, validate: validateDomain, normalize: normalizeDomain },
-        ]
+      : mode === 'ssh'
+        ? [
+            { key: 'host', flagName: '--ssh-host', flag: flags.sshHost, label: 'SSH 服务器地址', defaultValue: existingSsh.host, required: true, validate: validateServer },
+            { key: 'port', flagName: '--ssh-port', flag: flags.sshPort, label: 'SSH 服务器端口', defaultValue: existingSsh.port ?? 22, required: true, validate: validatePort, coerce: (v) => Number(v) },
+            { key: 'user', flagName: '--ssh-user', flag: flags.sshUser, label: 'SSH 用户名', defaultValue: existingSsh.user ?? os.userInfo().username, required: true, validate: validateSshUser },
+            { key: 'keyPath', flagName: '--ssh-key', flag: flags.sshKey, label: 'SSH 私钥路径', defaultValue: existingSsh.keyPath ?? defaultSshKeyPath(), required: true, validate: validateSshKeyPath },
+            { key: 'domain', flagName: '--domain', flag: flags.domain, label: '公网域名', defaultValue: existingCfg.domain, required: true, validate: validateDomain, normalize: normalizeDomain },
+          ]
+        : []
 
     const collected = await collectFields(specs, nonTty, ensureRl())
     if (collected.aborted) {
@@ -425,7 +429,7 @@ export async function ensureConfigured(argv = [], io = {}) {
     if (mode === 'frp') {
       writeFile(FRPC_PATH, renderFrpcToml(values))
       writeFile(CONFIG_PATH, JSON.stringify(mergeDomain({ ...existingCfg, mode: 'frp' }, values.domain), null, 2) + '\n')
-    } else {
+    } else if (mode === 'ssh') {
       const nextCfg = {
         ...existingCfg,
         mode: 'ssh',
@@ -433,16 +437,19 @@ export async function ensureConfigured(argv = [], io = {}) {
         ssh: { host: values.host, port: values.port, user: values.user, keyPath: values.keyPath },
       }
       writeFile(CONFIG_PATH, JSON.stringify(nextCfg, null, 2) + '\n')
+    } else {
+      // lan：无隧道字段，仅记 mode；保留已有 domain/ssh 等字段便于切回
+      writeFile(CONFIG_PATH, JSON.stringify({ ...existingCfg, mode: 'lan' }, null, 2) + '\n')
     }
 
-    // frp 模式：检查 frpc 二进制；ssh 模式：检查 ssh + 连通性自检
+    // frp 模式：检查 frpc 二进制；ssh 模式：检查 ssh + 连通性自检；lan 模式：无前置条件
     if (mode === 'frp') {
       const frpcName = frpcBinaryName()
       if (!fs.existsSync(path.join(__dirname, 'frp', frpcName))) {
         printFrpcMissingHint(frpcName)
         return { action: 'exit', code: 1 }
       }
-    } else {
+    } else if (mode === 'ssh') {
       const check = sshSelfCheck({ host: values.host, port: values.port, user: values.user, keyPath: values.keyPath })
       if (check.status === 'ssh-not-found' || check.status === 'host-key-unverified' || check.status === 'auth-failed') {
         console.error(`[setup] SSH 连通性自检未通过（${check.status}）`)
@@ -460,11 +467,13 @@ export async function ensureConfigured(argv = [], io = {}) {
     console.log('[setup] 配置完成：')
     if (mode === 'frp') {
       console.log(`[setup]   隧道: frp → ${values.serverAddr}:${values.serverPort}`)
-    } else {
+    } else if (mode === 'ssh') {
       console.log(`[setup]   隧道: ssh → ${values.user}@${values.host}:${values.port}`)
       console.log(`[setup]   私钥: ${values.keyPath}`)
+    } else {
+      console.log('[setup]   模式: lan（局域网直连，无隧道）')
     }
-    console.log(`[setup]   公网域名: ${values.domain}`)
+    if (mode !== 'lan') console.log(`[setup]   公网域名: ${values.domain}`)
     console.log('[setup] 已写入 config.json' + (mode === 'frp' ? ' 与 frp/frpc.toml' : '') + '（网关 token 由 gateway 自动生成）')
     return { action: 'configured' }
   } finally {

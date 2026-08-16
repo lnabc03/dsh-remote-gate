@@ -1,9 +1,10 @@
-// dsh-mobile-mini 一键启动：dsh web + 网关 + 隧道（frp 或 ssh 反向隧道），全部收进当前窗口
+// dsh-mobile-mini 一键启动：dsh web + 网关 + 隧道（frp / ssh 反向隧道）或局域网直连，全部收进当前窗口
 //
 // 策略：
 //   - dsh web：启动前先探 3080，已在运行则跳过；崩溃后自动重启（最多 5 次，间隔 3s）
 //   - 网关：退出则整体退出；frpc：退出则整体退出（隧道断了网关不能裸跑）
 //   - ssh 反向隧道：非致命，退出后自动重拨（弱网/服务器重启不断链）
+//   - lan 模式：无隧道，网关绑 0.0.0.0 局域网直连（首次可能弹防火墙提示）
 //   - Ctrl+C 同时终止全部（Windows 下对派生树用 taskkill /T）
 
 import { spawn, execFile, execSync } from 'node:child_process'
@@ -195,12 +196,15 @@ async function main() {
   }
   startVital({ tag: 'gate', cmd: process.execPath, args: [path.join(__dirname, 'gateway.mjs')] })
 
-  // 隧道：frp（致命，退出团灭）或 ssh 反向隧道（非致命，退出自动重拨）
+  // 隧道：frp（致命，退出团灭）/ ssh 反向隧道（非致命，退出自动重拨）/ lan（无隧道，网关直连局域网）
   let cfg = {}
   try { cfg = readConfigJson(fs.readFileSync(path.join(__dirname, 'config.json'), 'utf8')) } catch { /* 无配置则默认 frp */ }
   if (cfg.mode === 'ssh') {
     console.log('[start] 隧道模式：ssh 反向隧道')
     startSsh(cfg.ssh || {})
+  } else if (cfg.mode === 'lan') {
+    console.log('[start] 模式：局域网直连（网关绑 0.0.0.0，无隧道）')
+    console.log('[start]   首次绑 0.0.0.0 时 Windows 可能弹防火墙提示，请点「允许」')
   } else {
     console.log('[start] 隧道模式：frp')
     startVital({ tag: 'frpc', cmd: path.join(__dirname, 'frp', frpcBinaryName()), args: ['-c', path.join(__dirname, 'frp', 'frpc.toml')] })
