@@ -28,19 +28,18 @@ git clone <repo> && cd dsh-remote-gate
 
 # 1. 放入 frpc：从 https://github.com/fatedier/frp/releases 下载对应平台 release，
 #    把 frpc 可执行文件放进 frp/ 目录
-# 2. 配置隧道
-cp frp/frpc.toml.example frp/frpc.toml   # 然后填入服务器地址与 token
-
-# 3. 一键启动（Windows 可直接双击 start.bat）
+# 2. 一键启动（Windows 可直接双击 start.bat）；首次运行会交互式询问 frp 配置
 npm start
 ```
 
-`npm start`（即 `start.mjs`）在单窗口内拉起三个进程，日志带 `[dsh]` / `[gate]` / `[frpc]` 前缀：
+`npm start`（即 `start.mjs`）首次运行会交互式询问 4 项——frps 服务器地址、端口（默认 7000）、认证 token、公网域名——写入 `frp/frpc.toml` 与 `config.json`，然后单窗口拉起三个进程，日志带 `[dsh]` / `[gate]` / `[frpc]` 前缀：
 
-- 先探测 3080：dsh web 已在运行则跳过，否则自动执行 `npx @deepseek-ai/dsh web`；崩溃自动重启（5 次 × 3s）
+- 先探测 3080：dsh web 已在运行则跳过，否则直接 `spawn(node, [全局 dsh 的 bin.js, 'web'])`（不经过 npx/shell，避免关窗口残留孤儿进程）；崩溃自动重启（5 次 × 3s）
 - 再启动网关与 frpc 隧道；任一关键进程退出则整体退出；Ctrl+C 全部终止
 
-首次运行生成随机访问令牌写入 `config.json`，启动日志会打印登录链接：
+已配置后每次启动都会跳过提问；`npm start -- --setup` 重新配置（现有值作默认，回车保留）。也支持命令行标志：`--server`、`--server-port`、`--auth-token`、`--domain`（`--help` 查看全部）。
+
+网关首次运行生成随机访问令牌写入 `config.json`，启动日志会打印登录链接：
 
 ```
 https://<你的域名>/?t=<token>
@@ -66,7 +65,8 @@ https://<你的域名>/?t=<token>
 | env | `DSH_GATE_PORT` | `3088` | 监听端口（只绑 127.0.0.1） |
 | env | `DSH_GATE_TARGET_PORT` | `3080` | DSH Web UI 端口 |
 | env | `DSH_GATE_TOKEN` | — | 访问令牌（设置后不再读写 config.json） |
-| `config.json` | `token` / `port` / `targetPort` | — | 同上，文件形式 |
+| env | `DSH_GATE_DOMAIN` | — | 公网域名，打印登录链接用（`config.json` 的 `domain` 同效） |
+| `config.json` | `token` / `port` / `targetPort` / `domain` | — | 同上，文件形式；`domain` 由 setup 写入 |
 
 ## 安全模型
 
@@ -86,6 +86,8 @@ npm test   # 起 mock 上游 + 网关子进程：认证/头清洗/HTML 注入顺
 | --- | --- |
 | `gateway.mjs` | 网关本体：令牌认证 + 反代 + WS 隧道 + manifest 注入 |
 | `start.mjs` / `start.bat` | 一键启动（dsh web + 网关 + frpc，单窗口） |
+| `setup.mjs` | 首次运行交互式配置（frp 隧道 + 公网域名） |
+| `patch-dsh.mjs` | 幂等补丁 DSH client-runtime（修复提问弹窗被重连刷没） |
 | `pwa/` | manifest.json、最小 service worker、图标（dsh 官方鲸鱼 logo） |
 | `frp/frpc.toml.example` | frp 客户端配置模板 |
 | `test/gateway.test.mjs` | 冒烟测试 |

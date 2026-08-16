@@ -9,6 +9,7 @@
 //   DSH_GATE_PORT         监听端口（默认 3088，只绑 127.0.0.1）
 //   DSH_GATE_TARGET_PORT  DSH Web UI 端口（默认 3080）
 //   DSH_GATE_TOKEN        访问令牌（设置后不再读写 config.json）
+//   DSH_GATE_DOMAIN       公网域名（用于打印登录链接，如 dsh.example.com）
 
 import http from 'node:http'
 import net from 'node:net'
@@ -27,11 +28,13 @@ try { fileCfg = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8')) } catch { /* fi
 let TOKEN = process.env.DSH_GATE_TOKEN || fileCfg.token
 if (!TOKEN) {
   TOKEN = crypto.randomBytes(24).toString('base64url')
-  fs.writeFileSync(CONFIG_PATH, JSON.stringify({ token: TOKEN }, null, 2) + '\n', { mode: 0o600 })
+  // 合并保留已有字段（如 setup 写进来的 domain），而不是整体覆盖
+  fs.writeFileSync(CONFIG_PATH, JSON.stringify({ ...fileCfg, token: TOKEN }, null, 2) + '\n', { mode: 0o600 })
 }
 const PORT = Number(process.env.DSH_GATE_PORT || fileCfg.port || 3088)
 const TARGET_HOST = '127.0.0.1'
 const TARGET_PORT = Number(process.env.DSH_GATE_TARGET_PORT || fileCfg.targetPort || 3080)
+const DOMAIN = process.env.DSH_GATE_DOMAIN || fileCfg.domain || ''
 const COOKIE_NAME = 'dg_token'
 const HTML_LIMIT = 4 * 1024 * 1024
 
@@ -288,5 +291,5 @@ server.on('upgrade', (req, socket, head) => {
 server.listen(PORT, '127.0.0.1', () => {
   console.log(`[dsh-mobile-mini] listening on 127.0.0.1:${PORT} -> ${TARGET_HOST}:${TARGET_PORT}`)
   console.log(`[dsh-mobile-mini] 首次登录链接（token 见 config.json）:`)
-  console.log(`[dsh-mobile-mini]   https://<你的域名>/?t=${TOKEN}`)
+  console.log(`[dsh-mobile-mini]   https://${DOMAIN || '<你的域名>'}/?t=${TOKEN}`)
 })

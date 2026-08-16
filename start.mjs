@@ -5,13 +5,24 @@
 //   - 网关 / frpc：任一退出则整体退出（隧道断了网关不能裸跑）
 //   - Ctrl+C 同时终止全部（Windows 下对 npx 派生树用 taskkill /T）
 
-import { spawn, execFile } from 'node:child_process'
+import { spawn, execFile, execSync } from 'node:child_process'
 import path from 'node:path'
+import fs from 'node:fs'
 import http from 'node:http'
 import { fileURLToPath } from 'node:url'
+import { ensureConfigured, frpcBinaryName } from './setup.mjs'
+import { patchDsh } from './patch-dsh.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const DSH_PORT = 3080
+
+// frpc 日志过滤：这些是已知无害的告警（如 work connection pool is full），不打印。
+const FRPC_IGNORE = ['work connection pool is full']
+
+function shouldIgnoreLine(tag, line) {
+  if (tag !== 'frpc') return false
+  return FRPC_IGNORE.some((needle) => line.includes(needle))
+}
 
 const procs = []
 let shuttingDown = false
@@ -40,9 +51,9 @@ function attach(p, tag) {
       buf += d
       const lines = buf.split('\n')
       buf = lines.pop()
-      for (const line of lines) out.write(`[${tag}] ${line}\n`)
+      for (const line of lines) if (!shouldIgnoreLine(tag, line)) out.write(`[${tag}] ${line}\n`)
     })
-    stream.on('end', () => { if (buf) out.write(`[${tag}] ${buf}\n`) })
+    stream.on('end', () => { if (buf && !shouldIgnoreLine(tag, buf)) out.write(`[${tag}] ${buf}\n`) })
   }
   procs.push(p)
   return p
@@ -59,9 +70,34 @@ function probeDsh() {
   })
 }
 
+// 定位全局安装的 @deepseek-ai/dsh 的 bin.js（不经过 npx/shell 中转，避免派生树残留）
+let dshBinCache
+function resolveDshBin() {
+  if (dshBinCache !== undefined) return dshBinCache
+  const candidates = []
+  if (process.env.DSH_BIN) candidates.push(process.env.DSH_BIN)
+  try {
+    const root = execSync('npm root -g', { encoding: 'utf8', windowsHide: true }).trim()
+    if (root) candidates.push(path.join(root, '@deepseek-ai', 'dsh', 'lib', 'bin.js'))
+  } catch { /* fall through */ }
+  if (process.platform === 'win32' && process.env.APPDATA) {
+    candidates.push(path.join(process.env.APPDATA, 'npm', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'))
+  }
+  for (const c of candidates) {
+    if (fs.existsSync(c)) { dshBinCache = c; return c }
+  }
+  dshBinCache = null
+  return null
+}
+
 function startDsh(retriesLeft = 5) {
-  const p = spawn('npx @deepseek-ai/dsh web', {
-    shell: true, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
+  const dshBin = resolveDshBin()
+  if (dshBin === null) {
+    console.error('[start] 未找到全局安装的 @deepseek-ai/dsh，请先执行 npm install -g @deepseek-ai/dsh')
+    return
+  }
+  const p = spawn(process.execPath, [dshBin, 'web'], {
+    stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
   })
   attach(p, 'dsh')
   p.on('error', (err) => console.error(`[start] dsh 启动失败: ${err.message}`))
@@ -88,7 +124,27 @@ function startVital({ tag, cmd, args }) {
 }
 
 async function main() {
-  if (await probeDsh()) {
+  // 1) 首次运行交互式配置（frp 隧道 + 公网域名）；frpc 缺失时退出并提示下载
+  const setup = await ensureConfigured(process.argv.slice(2))
+  if (setup.action === 'exit') process.exit(setup.code)
+  if (setup.action === 'configured') console.log('')
+
+  // 2) 补丁 DSH client-runtime（修复「提问弹窗被重连刷没」）；幂等，失败不阻断启动
+  const dshWasRunning = await probeDsh()
+  const patch = patchDsh()
+  if (patch.status === 'patched') {
+    console.log(`[start] 已补丁 DSH client-runtime：${patch.path}`)
+    if (dshWasRunning) console.log('[start] 注意：dsh web 已在运行，补丁需重启 dsh 后生效')
+  } else if (patch.status === 'already') {
+    console.log(`[start] DSH client-runtime 补丁已存在：${patch.path}`)
+  } else if (patch.status === 'missing') {
+    console.log('[start] 未找到 DSH client-runtime（可能尚未安装），跳过补丁；提问弹窗问题可能仍存在')
+  } else {
+    console.log(`[start] DSH 补丁失败（${patch.message}），跳过；提问弹窗问题可能仍存在`)
+  }
+
+  // 3) 启动 dsh web（已在运行则跳过）
+  if (dshWasRunning) {
     console.log('[start] 检测到 dsh web 已在 3080 运行，跳过启动')
   } else {
     console.log('[start] 启动 dsh web...')
@@ -101,10 +157,14 @@ async function main() {
     }
   }
   startVital({ tag: 'gate', cmd: process.execPath, args: [path.join(__dirname, 'gateway.mjs')] })
-  startVital({ tag: 'frpc', cmd: path.join(__dirname, 'frp', 'frpc.exe'), args: ['-c', path.join(__dirname, 'frp', 'frpc.toml')] })
+  startVital({ tag: 'frpc', cmd: path.join(__dirname, 'frp', frpcBinaryName()), args: ['-c', path.join(__dirname, 'frp', 'frpc.toml')] })
 }
 
-process.on('SIGINT', () => shutdown(0))
-process.on('SIGTERM', () => shutdown(0))
+const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)
+if (isMain) {
+  process.on('SIGINT', () => shutdown(0))
+  process.on('SIGTERM', () => shutdown(0))
+  main()
+}
 
-main()
+export { shouldIgnoreLine, FRPC_IGNORE }
