@@ -97,6 +97,8 @@ http://<本机局域网IP>:3088/?t=<token>   # lan 模式
 npm test   # 起 mock 上游 + 网关子进程：认证/头清洗/HTML 注入顺序/静态资产/路径穿越
 ```
 
+> 真机端到端（SSH 反向隧道 / LAN 局域网直连）的逐步清单见 [`TESTING.md`](TESTING.md)。
+
 ## 项目结构
 
 | 路径 | 作用 |
