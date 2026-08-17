@@ -4,6 +4,7 @@ import assert from 'node:assert/strict'
 import http from 'node:http'
 import fs from 'node:fs'
 import os from 'node:os'
+import zlib from 'node:zlib'
 import { spawn } from 'node:child_process'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -16,6 +17,8 @@ const GATE_PORT = 31000 + Math.floor(Math.random() * 5000)
 const UP_PORT = GATE_PORT + 5001
 
 const HTML_PAGE = '<!doctype html><html><head><title>dsh</title><link rel="manifest" href="/manifest.webmanifest" /></head><body>hello</body></html>'
+const BIG_JS = 'console.log("' + 'x'.repeat(200 * 1024) + '")\n' // >1KB 可压资产
+const SSE_BODY = 'data: hello\n\n'.repeat(100) // >1KB 流式响应（验证不被压缩）
 
 let upstream, gate, lastUpstreamHeaders
 
@@ -32,6 +35,16 @@ before(async () => {
     if (req.url === '/api/data') {
       res.writeHead(200, { 'Content-Type': 'application/json' })
       res.end('{"ok":true}')
+      return
+    }
+    if (req.url === '/assets/big.js') {
+      res.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8' })
+      res.end(BIG_JS)
+      return
+    }
+    if (req.url === '/api/stream') {
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' })
+      res.end(SSE_BODY)
       return
     }
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
@@ -126,6 +139,49 @@ test('上游看到的头：host 重写、无 x-forwarded-*、无 origin、无网
   assert.ok(!('origin' in lastUpstreamHeaders))
   assert.ok(!('x-real-ip' in lastUpstreamHeaders))
   assert.ok(!String(lastUpstreamHeaders.cookie || '').includes('dg_token'), '网关 Cookie 不应泄露给上游')
+})
+
+test('accept-encoding：导航请求（Accept 含 text/html）摘除，其余保留（隧道流量大头）', async () => {
+  const cookie = await loginCookie()
+  // API：fetch 默认 Accept: */* → 保留压缩协商
+  await fetch(base() + '/api/data', { headers: { Cookie: cookie } })
+  assert.ok('accept-encoding' in lastUpstreamHeaders, '非导航请求应保留 accept-encoding')
+  // 导航：可能返回 HTML 需要注入 → 摘除，强制未压缩
+  await fetch(base() + '/', { headers: { Cookie: cookie, Accept: 'text/html,application/xhtml+xml,*/*' } })
+  assert.ok(!('accept-encoding' in lastUpstreamHeaders), '导航请求应摘除 accept-encoding')
+})
+
+// 裸 http.get（undici fetch 会自动解压/改头，测压缩必须看线上字节）
+function rawGet(p, headers) {
+  return new Promise((resolve, reject) => {
+    http.get({ host: '127.0.0.1', port: GATE_PORT, path: p, headers }, (r) => {
+      const chunks = []
+      r.on('data', (c) => chunks.push(c))
+      r.on('end', () => resolve({ status: r.statusCode, headers: r.headers, raw: Buffer.concat(chunks) }))
+    }).on('error', reject)
+  })
+}
+
+test('网关侧 gzip：可压类型 + 客户端接受 → gzip 且解压后内容不变', async () => {
+  const cookie = await loginCookie()
+  const res = await rawGet('/assets/big.js', { Cookie: cookie, 'Accept-Encoding': 'gzip, br' })
+  assert.equal(res.status, 200)
+  assert.equal(res.headers['content-encoding'], 'gzip')
+  assert.ok(res.raw.length < BIG_JS.length / 2, 'gzip 应显著减小体积')
+  assert.equal(zlib.gunzipSync(res.raw).toString('utf8'), BIG_JS)
+})
+
+test('gzip 豁免：小响应不压、流式（event-stream）不压、客户端不接受时不压', async () => {
+  const cookie = await loginCookie()
+  const small = await rawGet('/api/data', { Cookie: cookie, 'Accept-Encoding': 'gzip' })
+  assert.equal(small.headers['content-encoding'], undefined)
+  assert.equal(small.raw.toString(), '{"ok":true}')
+  const sse = await rawGet('/api/stream', { Cookie: cookie, 'Accept-Encoding': 'gzip' })
+  assert.equal(sse.headers['content-encoding'], undefined)
+  assert.equal(sse.raw.toString(), SSE_BODY)
+  const noAe = await rawGet('/assets/big.js', { Cookie: cookie })
+  assert.equal(noAe.headers['content-encoding'], undefined)
+  assert.equal(noAe.raw.toString(), BIG_JS)
 })
 
 test('非 HTML 响应原样透传', async () => {

@@ -17,6 +17,7 @@ import http from 'node:http'
 import net from 'node:net'
 import os from 'node:os'
 import dgram from 'node:dgram'
+import zlib from 'node:zlib'
 import fs from 'node:fs'
 import path from 'node:path'
 import crypto from 'node:crypto'
@@ -108,16 +109,20 @@ function lanIp() {
 // 转发到 dsh 的头白名单：抹掉一切能暴露「非本机访问」的痕迹
 // - host 重写为 127.0.0.1:3080
 // - 丢弃 origin / referer / x-forwarded-* / forwarded / x-real-ip
-// - 丢弃 accept-encoding：强制上游返回未压缩内容，HTML 注入才安全
+// - accept-encoding 只在导航请求（Accept 含 text/html，可能返回 HTML 需要注入）上丢弃，
+//   强制未压缩以便注入；静态资源/API 放行压缩——全量摘除会让 JS bundle 以未压缩体积
+//   过隧道，流量翻好几倍（服务器按出站计费时这是最大的浪费源，实测半天近 1G）
 // - cookie 中剔除网关自己的 dg_token
 function cleanHeaders(req) {
   const drop = new Set(['host', 'origin', 'referer', 'connection', 'keep-alive', 'te', 'trailer',
     'transfer-encoding', 'upgrade', 'proxy-connection', 'proxy-authorization', 'proxy-authenticate',
-    'accept-encoding', 'forwarded', 'x-real-ip'])
+    'forwarded', 'x-real-ip'])
+  const isNav = String(req.headers.accept || '').includes('text/html')
   const out = {}
   for (const k in req.headers) {
     const lk = k.toLowerCase()
     if (drop.has(lk) || lk.startsWith('x-forwarded-')) continue
+    if (lk === 'accept-encoding' && isNav) continue
     if (lk === 'cookie') {
       const kept = String(req.headers[k]).split(';')
         .filter(p => p.split('=')[0].trim() !== COOKIE_NAME).join(';')
@@ -129,6 +134,22 @@ function cleanHeaders(req) {
   out['host'] = TARGET_HOST + ':' + TARGET_PORT
   return out
 }
+
+// ---- 流量统计：验证压缩收益；仅累计打印，不影响转发 -------------------------------
+const meter = { up: 0, down: 0, upTotal: 0, downTotal: 0 }
+const meterUp = (n) => { meter.up += n; meter.upTotal += n }
+const meterDown = (n) => { meter.down += n; meter.downTotal += n }
+function fmtBytes(n) {
+  if (n >= 1 << 30) return (n / (1 << 30)).toFixed(2) + ' GB'
+  if (n >= 1 << 20) return (n / (1 << 20)).toFixed(1) + ' MB'
+  if (n >= 1 << 10) return (n / (1 << 10)).toFixed(1) + ' KB'
+  return n + ' B'
+}
+setInterval(() => {
+  if (meter.up + meter.down === 0) return // 静默时段不刷日志
+  console.log(`流量: 最近 1h ↓${fmtBytes(meter.down)} ↑${fmtBytes(meter.up)}；累计 ↓${fmtBytes(meter.downTotal)} ↑${fmtBytes(meter.upTotal)}`)
+  meter.up = 0; meter.down = 0
+}, 3600_000).unref()
 
 // ---- auth failure soft limit（防在线爆破；frp 下所有来源都是 127.0.0.1，故按全局计） ----
 let fails = []
@@ -227,21 +248,32 @@ function injectHtml(html) {
 }
 
 // ---- 反向代理 -------------------------------------------------------------------
+// 网关侧 gzip：dsh 上游自己完全不压缩（实测 vendor.js 745KB 带不带 Accept-Encoding 都一样大），
+// 而服务器按出站计费，压缩只能在网关做。只压：客户端接受 gzip + 状态 200 + 上游未压缩 +
+// 可压类型 + 非流式。超过缓冲上限或流式响应维持原样透传。
+const GZIP_TYPE = /^(text\/|application\/(json|javascript|manifest\+json|xml|wasm)|image\/svg\+xml)/
+const GZIP_MIN = 1024 // 太小的响应压缩反而膨胀
+
 function forward(req, res) {
+  const clientGzip = /\bgzip\b/.test(String(req.headers['accept-encoding'] || ''))
   const upstream = http.request({
     host: TARGET_HOST, port: TARGET_PORT,
     method: req.method, path: req.url,
     headers: cleanHeaders(req),
   }, (upRes) => {
+    upRes.on('data', (c) => meterDown(c.length)) // 与 pipe/缓冲并存，仅计数
     const h = { ...upRes.headers }
-    const isHtml = String(h['content-type'] || '').includes('text/html') &&
-      (!h['content-encoding'] || h['content-encoding'] === 'identity')
-    if (!isHtml) {
+    const ct = String(h['content-type'] || '')
+    const ce = String(h['content-encoding'] || '')
+    const isHtml = ct.includes('text/html') && (!ce || ce === 'identity')
+    const mayGzip = !isHtml && clientGzip && upRes.statusCode === 200 &&
+      (!ce || ce === 'identity') && GZIP_TYPE.test(ct) && !ct.includes('text/event-stream')
+    if (!isHtml && !mayGzip) {
       res.writeHead(upRes.statusCode || 502, h)
       upRes.pipe(res)
       return
     }
-    // HTML：缓冲后注入。超过上限则原样透传（已收字节未改动，content-length 仍有效）
+    // 缓冲后处理（HTML 注入 / gzip）。超过上限则原样透传（已收字节未改动，content-length 仍有效）
     const chunks = []
     let size = 0, passthrough = false
     upRes.on('data', (c) => {
@@ -256,13 +288,21 @@ function forward(req, res) {
     })
     upRes.on('end', () => {
       if (passthrough) { res.end(); return }
-      const body = Buffer.from(injectHtml(Buffer.concat(chunks).toString('utf8')), 'utf8')
+      let body = isHtml
+        ? Buffer.from(injectHtml(Buffer.concat(chunks).toString('utf8')), 'utf8')
+        : Buffer.concat(chunks)
       // 长度改变：清掉 hop-by-hop 头，重写 content-length（TE 与 CL 并存会被 fetch 拒绝）
       delete h['transfer-encoding']
       delete h['connection']
       delete h['keep-alive']
+      if (isHtml) {
+        h['cache-control'] = 'no-store' // 仅 HTML；hash 命名的静态资产必须保留浏览器缓存，否则流量反增
+      } else if (body.length > GZIP_MIN) {
+        body = zlib.gzipSync(body)
+        h['content-encoding'] = 'gzip'
+        h['vary'] = 'Accept-Encoding'
+      }
       h['content-length'] = String(body.length)
-      h['cache-control'] = 'no-store'
       res.writeHead(upRes.statusCode || 502, h)
       res.end(body)
     })
@@ -275,6 +315,7 @@ function forward(req, res) {
     } catch { }
   })
   res.on('close', () => { try { upstream.destroy() } catch { } })
+  req.on('data', (c) => meterUp(c.length))
   req.pipe(upstream)
 }
 
@@ -326,6 +367,8 @@ server.on('upgrade', (req, socket, head) => {
     try {
       upstream.write(raw)
       if (head && head.length) upstream.write(head)
+      socket.on('data', (c) => meterUp(c.length)) // WS 帧计数（pipe 之外并行监听，不消费）
+      upstream.on('data', (c) => meterDown(c.length))
       socket.pipe(upstream)
       upstream.pipe(socket)
     } catch { kill() }

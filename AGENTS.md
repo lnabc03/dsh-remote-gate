@@ -12,10 +12,10 @@
 ## 不可违反的设计约束（都是踩坑换来的）
 
 1. **绝不引入任何基于 IP 的逻辑**。经 frp 后所有请求的 remoteAddress 都是 127.0.0.1，IP 审批/限流/本机栅栏在此拓扑下全部失效且有安全反效果（远端用户会被误判为"本机"）。认证只有令牌 + HttpOnly Cookie 一条路；防爆破用全局失败计数，不按 IP。
-2. **转发给 DSH 的请求必须与本机浏览器访问不可区分**（dsh 对敏感 API 有本机风控）：Host 重写为 `127.0.0.1:3080`；丢弃 `Origin`/`Referer`/`X-Forwarded-*`/`X-Real-IP`/`Forwarded`/`Accept-Encoding`；网关自身的 `dg_token` Cookie 不转发上游。改 `cleanHeaders` 时不要放宽。
+2. **转发给 DSH 的请求必须与本机浏览器访问不可区分**（dsh 对敏感 API 有本机风控）：Host 重写为 `127.0.0.1:3080`；丢弃 `Origin`/`Referer`/`X-Forwarded-*`/`X-Real-IP`/`Forwarded`；网关自身的 `dg_token` Cookie 不转发上游。改 `cleanHeaders` 时不要放宽。`Accept-Encoding` **只在导航请求（Accept 含 text/html，可能需要 HTML 注入）上摘除**，其余请求必须放行压缩——全量摘除会让 JS bundle 未压缩过隧道，按出站计费的服务器流量翻好几倍（踩过，半天近 1G）。且 dsh 上游自身完全不压缩（实测），**网关在出站侧对可压响应做 gzip**（>1KB、非流式、上游未压缩、客户端接受）——`GZIP_TYPE`/`mayGzip` 的豁免（event-stream、小响应、已压缩、非 200）勿删，流式响应必须保持逐块透传。
 3. **HTML 注入点必须紧跟 `<head>` 之后**。dsh 自带 `<link rel="manifest">`（无 PNG 图标），浏览器只认文档中第一个 manifest 链接，注在 `</head>` 前会被它挤掉（安卓无法安装的根因）。
 4. **`/pwa/*` 静态资产豁免认证**。iOS「添加到主屏幕」抓图标/manifest 不带会话 Cookie，拦 401 会丢图标。仅限这个前缀下的白名单文件，路径穿越防护不可删；未来 `/pwa/push/*` 这类动态端点必须另行鉴权，不能跟着豁免。
-5. 注入改写响应体时，必须删掉 `Transfer-Encoding`/`Connection`/`Keep-Alive` 并重写 `Content-Length`——TE 与 CL 并存会被浏览器 fetch 拒收（踩过）。前提是把 `Accept-Encoding` 摘掉让上游返回未压缩内容，压缩字节不可注入。
+5. 注入改写响应体时，必须删掉 `Transfer-Encoding`/`Connection`/`Keep-Alive` 并重写 `Content-Length`——TE 与 CL 并存会被浏览器 fetch 拒收（踩过）。前提是导航请求的 `Accept-Encoding` 被摘掉（见约束 2）让上游返回未压缩 HTML，压缩字节不可注入。
 6. **dsh 必须由 `start.mjs` 直接 `spawn(node, [dshBin, 'web'])` 启动，绝不能走 `npx`/`shell` 中转**。Windows 点窗口 X 关控制台发的是 `CTRL_CLOSE_EVENT`，Node 不触发 `SIGINT`/`SIGTERM`，`shutdown()` 里的 `taskkill /T` 根本不执行；`npx → cmd → dsh web` 深层进程脱离控制台成为孤儿（下次 `probeDsh` 复用残留，补丁/改动都不生效）。直接子进程则随控制台一起退出，Ctrl+C 的 `taskkill /T` 也少两层中间进程、杀得更干净。
 7. **ssh 反向隧道**：`ssh -R 3088:127.0.0.1:3088`，`remotePort` 固定 3088（服务器反代硬编码指向它，别改）。认证只用密钥（复用已有私钥，`-i` 指定路径），`BatchMode=yes` 拒绝密码交互；`StrictHostKeyChecking=yes`（预先录入 known_hosts，否则拒连——防中间人），**绝不放宽成 `accept-new`/`no`**。重连在 Node 内手写（退出 3s 重拨、不团灭），**不要引入 autossh**（零依赖约束）。ssh 进程非致命、frpc 致命：别把 ssh 的退出语义与 frpc 的「退出=团灭」混同。
 8. **lan 局域网模式**：`mode:"lan"` 下网关绑 `0.0.0.0`（`DSH_GATE_BIND` 可覆盖），`start.mjs` 不启动任何隧道。明文 HTTP 是已接受的取舍（Android 丢完整 PWA + SW，iPhone 仍可 web clip；令牌可被同网嗅探）——**不要试图为 lan 加自签 HTTPS / 本地 CA**。防火墙是唯一网络边界：只提示用户放行「专用网络」，**程序不改系统防火墙**。仍不引入按 IP 的逻辑（约束 1 不因 lan 出现真实来源 IP 而破例）。
@@ -24,7 +24,7 @@
 
 | 路径 | 职责 | 改动注意 |
 | --- | --- | --- |
-| `gateway.mjs` | 令牌认证 + 反代 + WS 隧道 + manifest 注入 | 改完必跑 `npm test` |
+| `gateway.mjs` | 令牌认证 + 反代 + WS 隧道 + manifest 注入 + 流量统计（每小时一行 ↓↑ 字节，静默时段不刷） | 改完必跑 `npm test` |
 | `start.mjs` | 拉起 dsh web + 网关 + 隧道（frp/ssh）或 lan 直连，单窗口日志加前缀 | dsh 崩溃自动重启；网关/frpc 退出则团灭，ssh 退出则 3s 重拨（不团灭，见约束 7），lan 模式不启动隧道；dsh 直接 spawn node bin.js（见约束 6），杀派生树用 `taskkill /T` |
 | `setup.mjs` | 首次运行交互式配置（访问模式 frp/ssh/lan + 公网域名 + SSH 连通性自检） | frp 全量重写 `frpc.toml`；ssh 写 `config.json` 的 `mode`/`ssh.*`；lan 只写 `mode:"lan"`；改校验/渲染/ssh 参数必跑 `npm test` |
 | `patch-dsh.mjs` | 幂等补丁 DSH client-runtime（修复提问弹窗被重连刷没） | 锚点严格 LF + Tab；改锚点先跑 `npm test` |
