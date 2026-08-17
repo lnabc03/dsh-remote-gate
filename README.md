@@ -134,12 +134,6 @@ npm test   # 85 项：mock 上游 + 网关/面板/配置库/补丁锚点等
 | `frp/` / `cf/` | frpc 模板 / cloudflared 放置目录 |
 | `test/` | 六组自动化测试 |
 
-## Roadmap
-
-- [ ] 任务完成 Web Push 通知
-- [ ] 多机路由（按电脑分子域名）
-- [ ] cf 模式升级 named tunnel（固定域名）
-
 ## 致谢
 
 - 设计灵感来自 [dsh-mobile-pwa](https://github.com/zylzyqzz/dsh-mobile-pwa)（MIT）与其上游 [dsh-mobile-gate](https://github.com/Bernardxu123/dsh-mobile-gate)（MIT）
