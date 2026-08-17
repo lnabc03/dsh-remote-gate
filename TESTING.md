@@ -1,11 +1,11 @@
 # 手动端到端测试清单
 
-> 本清单覆盖 **SSH 反向隧道** 与 **LAN 局域网直连** 两种模式的真实环境验证（两者均已真机实测基本可用，本清单用于回归与换环境后复验）。
-> 纯逻辑已由自动化测试覆盖（`npm test`，当前 35 项）；本清单只列必须要有真实服务器 / 真机 / 真网络才能验的项，逐条打勾即可。
+> 本清单覆盖 **SSH 反向隧道**、**LAN 局域网直连** 与 **CF 临时隧道** 三种模式的真实环境验证（前两者已真机实测基本可用；cf 已实现待实测）。
+> 纯逻辑已由自动化测试覆盖（`npm test`，当前 45 项）；本清单只列必须要有真实服务器 / 真机 / 真网络才能验的项，逐条打勾即可。
 
 ## 0. 基线（每次开始前）
 
-- [x] `npm test` 全绿（35/35）
+- [x] `npm test` 全绿（45/45）
 - [x] `git status` 干净，无 `config.json` / `frp/frpc.toml` / `.dsh-usage-stats.json` 泄漏
 
 ---
@@ -89,27 +89,58 @@
 
 ---
 
-## 3. 三模式切换回归
+## 3. CF 临时隧道模式（quick tunnel）
 
-- [ ] lan → `npm start -- --mode ssh`：`config.json` 保留原 `ssh.*` / `domain`，直接可用，无需重填
-- [ ] lan → `npm start -- --mode frp`：frpc 正常拉起，公网 PWA 恢复可安装
-- [ ] 老安装（无 `mode` 字段）直接 `npm start`：仍默认 frp，无感（向后兼容）
-- [ ] `npm start -- --mode foo`：报「访问模式只能是 frp、ssh 或 lan」并退出
+### 3.1 前置
+
+- [ ] 已下载 cloudflared 放进 `cf/`（见 `cf/README.md`）；`cf/cloudflared.exe version` 能输出版本号
+- [ ] 未下载时 `npm start -- --mode cf`：打印下载指引并以非零码退出，配置已写入
+
+### 3.2 启动与访问
+
+- [ ] `npm start -- --mode cf` → `config.json` 出现 `mode:"cf"`；日志出现 `[cf]` 前缀，无 `[frpc]`/`[ssh]`
+- [ ] 数秒后 `[start]` 打印 `登录链接: https://<随机串>.trycloudflare.com/?t=…`，无 cloudflared 的边框刷屏
+- [ ] 手机（移动数据）打开该链接 → 302 → 进入 DSH，可正常对话、流式输出正常
+- [ ] 登录 Cookie 带 `Secure`（CF 恒定 HTTPS，网关强制，不依赖 X-Forwarded-Proto）
+
+### 3.3 生命周期
+
+- [ ] 关掉 cloudflared 进程（或拔网线致其退出）→ **团灭**：start.bat 整体退出，日志说明「重启后会分配新域名」
+- [ ] 重启 `npm start`：分配到**新的**临时域名，旧链接确认失效
+- [ ] （可选）长时间挂机观察：CF 偶发强制轮换长存活的 quick tunnel，表现为入口失效，重启即恢复
+
+### 3.4 已知限制核对（预期行为，非 bug）
+
+- [ ] 大陆→CF 链路延迟/稳定性记录（运营商 + 时段），与 frp 模式对比，决定去留
+- [ ] `/compact` 超过 100 秒 → CF 返回 524（免费层硬限制，不可调）
+- [ ] PWA 可安装但每次重启作废——不装，直接用标签页
 
 ---
 
-## 4. 安全核对（跨模式）
+## 4. 四模式切换回归
 
-- [ ] 单令牌三模式共用：同一 `?t=` 在 frp / ssh / lan 下都能登录（`config.json` 里是同一个 token）
+- [ ] lan → `npm start -- --mode ssh`：`config.json` 保留原 `ssh.*` / `domain`，直接可用，无需重填
+- [ ] lan → `npm start -- --mode frp`：frpc 正常拉起，公网 PWA 恢复可安装
+- [ ] 任意模式 → `npm start -- --mode cf`：写入 `mode:"cf"`，cloudflared 拉起并打印临时域名链接；切回 frp/ssh 后原配置无感恢复
+- [ ] 老安装（无 `mode` 字段）直接 `npm start`：仍默认 frp，无感（向后兼容）
+- [ ] `npm start -- --mode foo`：报「访问模式只能是 frp、ssh、lan 或 cf」并退出
+
+---
+
+## 5. 安全核对（跨模式）
+
+- [ ] 单令牌四模式共用：同一 `?t=` 在 frp / ssh / lan / cf 下都能登录（`config.json` 里是同一个 token）
 - [ ] lan：手机访问是 `http://`（地址栏无锁），登录 Cookie **不带** `Secure`（否则 HTTP 下登录态失效）
-- [ ] frp / ssh：登录 Cookie **带** `Secure`；`cleanHeaders` 仍抹掉 `X-Forwarded-*`（勿放宽）
+- [ ] frp / ssh / cf：登录 Cookie **带** `Secure`；`cleanHeaders` 仍抹掉 `X-Forwarded-*`（勿放宽）
+- [ ] cf：登录链接不泄露给不可信方（临时域名不可猜测，但令牌是唯一正式认证；CF 边缘可见明文）
 - [ ] `git status` 无敏感文件泄漏
 
 ---
 
-## 5. 已知未覆盖项
+## 6. 已知未覆盖项
 
 - [x] ~~SSH 真实端到端~~ 已实测基本可用（稳定性略逊于 frp、流式输出略卡，属预期）；重连/断线细项仍可照 §1.5 过一遍
 - [x] ~~LAN 真实端到端~~ 已实测可用（热点环境：进页面、选工作区、改设置均正常）。校园网不可用系 AP 客户端隔离，属环境限制，不算缺陷；换网络环境后可照 §2 复验
+- [ ] CF 临时隧道真实端到端（已实现，待真机实测；重点记录大陆链路质量，据此决定 cf 是否替代 frp）
 - [ ] 任务完成 Web Push（v2，已明确推迟）
 

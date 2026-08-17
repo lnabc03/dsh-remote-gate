@@ -211,6 +211,39 @@ test('/pwa 路径穿越被拒绝', async () => {
   assert.equal(res.status, 404)
 })
 
+test('cf 模式：无 X-Forwarded-Proto 也强制 Secure Cookie（CF 入口恒定 HTTPS，该头不可靠）', async () => {
+  const tmp = path.join(os.tmpdir(), 'dsh-gate-cf-' + Math.random().toString(36).slice(2) + '.json')
+  const cfPort = 31000 + Math.floor(Math.random() * 5000)
+  fs.writeFileSync(tmp, JSON.stringify({ mode: 'cf' }))
+  const gate = spawn(process.execPath, [GATEWAY], {
+    env: {
+      ...process.env,
+      DSH_GATE_CONFIG: tmp,
+      DSH_GATE_TOKEN: TOKEN,
+      DSH_GATE_PORT: String(cfPort),
+      DSH_GATE_TARGET_PORT: String(UP_PORT),
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  let out = ''
+  try {
+    await new Promise((resolve, reject) => {
+      gate.stdout.on('data', (d) => { out += d; if (out.includes('listening') && out.includes('cloudflared')) resolve() })
+      gate.stderr.on('data', (d) => { out += d })
+      gate.on('exit', (code) => reject(new Error('gateway exited early: ' + code + '\n' + out)))
+      setTimeout(() => reject(new Error('gateway listen timeout\n' + out)), 8000)
+    })
+    // cf 模式网关自己不知道临时域名，应提示看 start 输出而不是瞎猜域名
+    assert.match(out, /cloudflared/)
+    const res = await fetch(`http://127.0.0.1:${cfPort}/?t=` + encodeURIComponent(TOKEN), { redirect: 'manual' })
+    assert.equal(res.status, 302)
+    const cookie = res.headers.get('set-cookie') || ''
+    assert.match(cookie, /Secure/)
+  } finally {
+    try { gate.kill() } catch { }
+    try { fs.unlinkSync(tmp) } catch { }
+  }
+})
 test('lan 模式：网关绑 0.0.0.0 并打印局域网登录链接', async () => {
   const tmp = path.join(os.tmpdir(), 'dsh-gate-lan-' + Math.random().toString(36).slice(2) + '.json')
   const lanPort = 31000 + Math.floor(Math.random() * 5000)

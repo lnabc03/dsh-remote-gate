@@ -2,4 +2,6 @@ config.json
 node_modules/
 frp/frpc.exe
 frp/frpc.toml
+cf/cloudflared.exe
+cf/cloudflared
 .dsh-usage-stats.json

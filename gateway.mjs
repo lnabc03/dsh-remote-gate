@@ -11,7 +11,7 @@
 //   DSH_GATE_BIND         监听地址（默认按 config.json.mode：lan → 0.0.0.0，其余 → 127.0.0.1）
 //   DSH_GATE_TARGET_PORT  DSH Web UI 端口（默认 3080）
 //   DSH_GATE_TOKEN        访问令牌（设置后不再读写 config.json）
-//   DSH_GATE_DOMAIN       公网域名（用于打印登录链接，如 dsh.example.com；lan 模式忽略）
+//   DSH_GATE_DOMAIN       公网域名（用于打印登录链接，如 dsh.example.com；lan/cf 模式忽略）
 
 import http from 'node:http'
 import net from 'node:net'
@@ -41,6 +41,9 @@ const TARGET_HOST = '127.0.0.1'
 const TARGET_PORT = Number(process.env.DSH_GATE_TARGET_PORT || fileCfg.targetPort || 3080)
 const DOMAIN = process.env.DSH_GATE_DOMAIN || fileCfg.domain || ''
 const BIND_HOST = process.env.DSH_GATE_BIND || (fileCfg.mode === 'lan' ? '0.0.0.0' : '127.0.0.1')
+// cf（Cloudflare Tunnel）模式：CF 边缘只保证发 Cf-Visitor，X-Forwarded-Proto 时有时无，
+// 但入口恒定是 HTTPS——直接强制按 https 处理（Cookie Secure、登录链接 https）
+const FORCE_HTTPS = fileCfg.mode === 'cf'
 const COOKIE_NAME = 'dg_token'
 const HTML_LIMIT = 4 * 1024 * 1024
 
@@ -331,7 +334,7 @@ const server = http.createServer((req, res) => {
   if (ticket !== undefined) {
     if (failLimited()) { sendPage(res, 429, LIMITED_PAGE); return }
     if (!tokenEq(ticket, TOKEN)) { noteFail(); sendPage(res, 403, DENY_PAGE); return }
-    const secure = req.headers['x-forwarded-proto'] === 'https' ? '; Secure' : ''
+    const secure = (FORCE_HTTPS || req.headers['x-forwarded-proto'] === 'https') ? '; Secure' : ''
     res.writeHead(302, {
       'Location': '/',
       'Set-Cookie': COOKIE_NAME + '=' + TOKEN + '; Path=/; HttpOnly; SameSite=Lax; Max-Age=31536000' + secure,
@@ -386,6 +389,9 @@ server.listen(PORT, BIND_HOST, () => {
       const alts = lanCandidates().filter((a) => a !== ip && !a.startsWith('169.254.'))
       if (alts.length > 0) console.log(`备用 IP: ${alts.join(' / ')}（打不开时替换链接里的 IP 再试）`)
     })
+  } else if (FORCE_HTTPS) {
+    // cf 模式：域名由 cloudflared 每次启动随机分配，网关无从得知，登录链接由 start.mjs 抓 URL 后打印
+    console.log('登录链接: 由 cloudflared 分配临时域名，见启动器 [start] 输出')
   } else {
     console.log(`登录链接: https://${DOMAIN || '<你的域名>'}/?t=${TOKEN}`)
   }

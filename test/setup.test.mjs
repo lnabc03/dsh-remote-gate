@@ -19,6 +19,7 @@ import {
   readConfigJson,
   mergeDomain,
   frpcBinaryName,
+  cloudflaredBinaryName,
   buildSshReverseArgs,
   buildSshProbeArgs,
   analyzeSshResult,
@@ -51,6 +52,11 @@ test('parseArgs：解析 ssh 模式标志', () => {
 test('parseArgs：解析 lan 模式标志', () => {
   const flags = parseArgs(['--mode', 'lan'])
   assert.equal(flags.mode, 'lan')
+})
+
+test('parseArgs：解析 cf 模式标志', () => {
+  const flags = parseArgs(['--mode', 'cf'])
+  assert.equal(flags.mode, 'cf')
 })
 
 test('validateServer / validatePort / validateToken', () => {
@@ -141,13 +147,22 @@ test('frpcBinaryName 按平台', () => {
   assert.equal(frpcBinaryName('darwin'), 'frpc')
 })
 
+test('cloudflaredBinaryName 按平台', () => {
+  assert.equal(cloudflaredBinaryName('win32'), 'cloudflared.exe')
+  assert.equal(cloudflaredBinaryName('linux'), 'cloudflared')
+  assert.equal(cloudflaredBinaryName('darwin'), 'cloudflared')
+})
+
 test('validateMode / normalizeMode', () => {
   assert.equal(validateMode('frp'), null)
   assert.equal(validateMode('SSH'), null)
   assert.equal(validateMode('lan'), null)
   assert.equal(validateMode(' LAN '), null)
+  assert.equal(validateMode('cf'), null)
+  assert.equal(validateMode(' CF '), null)
   assert.equal(normalizeMode('  Ssh '), 'ssh')
   assert.equal(normalizeMode(' Lan '), 'lan')
+  assert.equal(normalizeMode(' Cf '), 'cf')
   assert.ok(validateMode('ftp'))
   assert.ok(validateMode(''))
 })

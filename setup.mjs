@@ -89,8 +89,8 @@ export function normalizeMode(v) {
 
 export function validateMode(v) {
   const s = normalizeMode(v)
-  if (s === 'frp' || s === 'ssh' || s === 'lan') return null
-  return '访问模式只能是 frp、ssh 或 lan'
+  if (s === 'frp' || s === 'ssh' || s === 'lan' || s === 'cf') return null
+  return '访问模式只能是 frp、ssh、lan 或 cf'
 }
 
 export function validateSshUser(v) {
@@ -190,6 +190,13 @@ export function frpcBinaryName(platform = process.platform) {
   return platform === 'win32' ? 'frpc.exe' : 'frpc'
 }
 
+// ---- cloudflared 可执行文件（cf 模式） ---------------------------------------------
+export function cloudflaredBinaryName(platform = process.platform) {
+  return platform === 'win32' ? 'cloudflared.exe' : 'cloudflared'
+}
+
+const CLOUDFLARED_RELEASES = 'https://github.com/cloudflare/cloudflared/releases'
+
 const FRP_RELEASES = 'https://github.com/fatedier/frp/releases'
 
 // ---- SSH 反向隧道 ---------------------------------------------------------------
@@ -265,7 +272,7 @@ function attachSshHint(result, { host, user }) {
 function printUsage() {
   console.log('用法：npm start [选项]')
   console.log('  --setup               强制进入交互式配置（即使已配置）')
-  console.log('  --mode <frp|ssh|lan>  访问模式（frp / ssh / lan）')
+  console.log('  --mode <frp|ssh|lan|cf>  访问模式（frp / ssh / lan / cf）')
   console.log('  --domain <域名>       公网域名（如 dsh.example.com；frp/ssh 模式）')
   console.log('  frp 模式：')
   console.log('  --server <地址>       frps 服务器地址')
@@ -278,6 +285,8 @@ function printUsage() {
   console.log('  --ssh-key <路径>      SSH 私钥路径（默认 ~/.ssh/id_ed25519）')
   console.log('  lan 模式：')
   console.log('                       无隧道、无额外字段，网关直连局域网（绑 0.0.0.0）')
+  console.log('  cf 模式：')
+  console.log('                       无服务器、无域名、无额外字段；cloudflared 每次启动分配临时域名')
   console.log('  --help, -h            显示帮助')
   console.log('')
   console.log('首次运行时若未配置会自动进入交互式配置（lan 模式无前置条件，无需任何字段）。')
@@ -376,8 +385,9 @@ export async function ensureConfigured(argv = [], io = {}) {
 
   const frpConfigured = frpcExists
   const sshConfigured = !!(existingSsh.host && existingSsh.user)
+  const cfConfigured = existingCfg.mode === 'cf' // cf 无字段，config.json 记了 mode 即视为已配置
   const modeChanged = flags.mode !== undefined && mode !== existingCfg.mode
-  const needsSetup = flags.setup || modeChanged || (mode === 'frp' && !frpConfigured) || (mode === 'ssh' && !sshConfigured)
+  const needsSetup = flags.setup || modeChanged || (mode === 'frp' && !frpConfigured) || (mode === 'ssh' && !sshConfigured) || (mode === 'cf' && !cfConfigured)
 
   if (!needsSetup) return { action: 'skip' }
 
@@ -392,7 +402,7 @@ export async function ensureConfigured(argv = [], io = {}) {
       console.log('首次配置 dsh-remote-gate：')
       console.log('')
       const picked = await promptField(ensureRl(), {
-        label: '模式 (frp / ssh / lan)', defaultValue: mode, required: true, validate: validateMode, normalize: normalizeMode,
+        label: '模式 (frp / ssh / lan / cf)', defaultValue: mode, required: true, validate: validateMode, normalize: normalizeMode,
       })
       if (picked === undefined) {
         console.log('')
@@ -442,15 +452,22 @@ export async function ensureConfigured(argv = [], io = {}) {
       }
       writeFile(CONFIG_PATH, JSON.stringify(nextCfg, null, 2) + '\n')
     } else {
-      // lan：无隧道字段，仅记 mode；保留已有 domain/ssh 等字段便于切回
-      writeFile(CONFIG_PATH, JSON.stringify({ ...existingCfg, mode: 'lan' }, null, 2) + '\n')
+      // lan / cf：无隧道字段，仅记 mode；保留已有 domain/ssh 等字段便于切回
+      writeFile(CONFIG_PATH, JSON.stringify({ ...existingCfg, mode }, null, 2) + '\n')
     }
 
-    // frp 模式：检查 frpc 二进制；ssh 模式：检查 ssh + 连通性自检；lan 模式：无前置条件
+    // frp 模式：检查 frpc 二进制；ssh 模式：检查 ssh + 连通性自检；cf 模式：检查 cloudflared 二进制；lan 模式：无前置条件
     if (mode === 'frp') {
       const frpcName = frpcBinaryName()
       if (!fs.existsSync(path.join(__dirname, 'frp', frpcName))) {
         printFrpcMissingHint(frpcName)
+        return { action: 'exit', code: 1 }
+      }
+    } else if (mode === 'cf') {
+      const cfName = cloudflaredBinaryName()
+      if (!fs.existsSync(path.join(__dirname, 'cf', cfName))) {
+        sayErr(`未找到 cf/${cfName}；请从 ${CLOUDFLARED_RELEASES} 下载对应平台 release（Windows 选 cloudflared-windows-amd64.exe，改名为 ${cfName} 放进 cf/ 目录）后重新运行 npm start`)
+        sayErr('配置已写入，下次运行不会再提问。')
         return { action: 'exit', code: 1 }
       }
     } else if (mode === 'ssh') {
@@ -470,7 +487,9 @@ export async function ensureConfigured(argv = [], io = {}) {
       ? `frp → ${values.serverAddr}:${values.serverPort}，域名 ${values.domain}`
       : mode === 'ssh'
         ? `ssh → ${values.user}@${values.host}:${values.port}（私钥 ${values.keyPath}），域名 ${values.domain}`
-        : 'lan（局域网直连，无隧道）'
+        : mode === 'cf'
+          ? 'cf（Cloudflare 临时隧道，零服务器零域名；每次启动分配临时域名）'
+          : 'lan（局域网直连，无隧道）'
     say(`配置完成：${desc}；已写入 config.json` + (mode === 'frp' ? ' 与 frp/frpc.toml' : ''))
     return { action: 'configured' }
   } finally {

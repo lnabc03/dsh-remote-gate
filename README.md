@@ -1,6 +1,6 @@
 # dsh-remote-gate
 
-> 最小化的 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（DSH）远程访问网关：手机/平板经公网服务器（frp 或 SSH 反向隧道中转）或同一局域网直连，安全操控本机的 DSH Web UI，可安装为 PWA。
+> 最小化的 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（DSH）远程访问网关：手机/平板经公网服务器（frp 或 SSH 反向隧道中转）、Cloudflare 临时隧道（零服务器）或同一局域网直连，安全操控本机的 DSH Web UI，可安装为 PWA。
 
 单文件、零依赖（Node ≥ 18），只做三件事：**令牌认证 · 反向代理（含 WebSocket）· PWA manifest 注入**。
 
@@ -17,6 +17,9 @@
 ```
 公网（frp / ssh 模式）：
 手机/平板 ──HTTPS──> 公网服务器（反代 TLS 终止）──隧道（frp 或 SSH 反向）──> 本机 127.0.0.1:3088（本网关）──> 127.0.0.1:3080（DSH Web UI）
+
+公网（cf 模式）：
+手机/平板 ──HTTPS──> Cloudflare 边缘（TLS 终止）──cloudflared 出站隧道──> 本机 127.0.0.1:3088（本网关）──> 127.0.0.1:3080（DSH Web UI）
 
 局域网（lan 模式）：
 手机/平板 ──HTTP──> 本机 0.0.0.0:3088（本网关）──> 127.0.0.1:3080（DSH Web UI）
@@ -35,29 +38,31 @@ git clone <repo> && cd dsh-remote-gate
 npm start
 ```
 
-`npm start`（即 `start.mjs`）首次运行先问**访问模式**（`frp` / `ssh` / `lan`），再问对应字段，写入 `config.json`（frp 模式额外写 `frp/frpc.toml`），然后单窗口拉起进程，日志带 `[dsh]` / `[gate]` / `[frpc]` 或 `[ssh]` 前缀：
+`npm start`（即 `start.mjs`）首次运行先问**访问模式**（`frp` / `ssh` / `lan` / `cf`），再问对应字段，写入 `config.json`（frp 模式额外写 `frp/frpc.toml`），然后单窗口拉起进程，日志带 `[dsh]` / `[gate]` / `[frpc]` / `[ssh]` / `[cf]` 前缀：
 
 - 先探测 3080：dsh web 已在运行则跳过，否则直接 `spawn(node, [全局 dsh 的 bin.js, 'web'])`（不经过 npx/shell，避免关窗口残留孤儿进程）；崩溃自动重启（5 次 × 3s）
-- 再启动网关与隧道；网关/frpc 退出则整体退出；ssh 隧道退出则自动重拨（不团灭）；Ctrl+C 全部终止
+- 再启动网关与隧道；网关/frpc/cloudflared 退出则整体退出（cf 隧道重拨必然换临时域名，旧入口静默失效不如明说）；ssh 隧道退出则自动重拨（不团灭）；Ctrl+C 全部终止
 
 - **frp 模式**：需先下载 frpc（见下），问 frps 地址/端口（默认 7000）/token/域名
 - **ssh 模式**：无需下载任何二进制（用系统自带 OpenSSH），问服务器地址/端口（默认 22）/用户名/私钥路径（默认 `~/.ssh/id_ed25519`）/域名
 - **lan 模式**：无需服务器、无需任何字段，网关绑 `0.0.0.0` 局域网直连（首次可能弹 Windows 防火墙提示，点「允许」）。打印的 IP 按系统默认路由选取（自动避开 VMware/Hyper-V 虚拟网卡），横幅同时列出其余候选 IP 供替换；校园网/企业 Wi-Fi 常开 AP 客户端隔离导致手机够不到电脑，可用「手机开热点、电脑连热点」排除
+- **cf 模式**：无需服务器、无需 Cloudflare 账号、无需域名——只需下载 cloudflared 二进制放进 `cf/`（见 [`cf/README.md`](cf/README.md)）。每次启动分配 `*.trycloudflare.com` 临时域名，启动日志打印带令牌的登录链接，需重新发到手机（旧链接随上次进程退出失效）。**代价**：入口不固定，PWA「添加到主屏幕」每次重启即作废（退化为浏览器标签页使用）；Cloudflare 免费层有 100 秒无响应硬超时（524），`/compact` 这类同步长命令超过 100s 会失败（SSE 流式输出不受影响）；TLS 在 CF 边缘终止，明文对 CF 可见（信任对象从自己的服务器换成 CF）；大陆访问 CF 边缘的延迟/稳定性因运营商和时段而异，建议先实测再决定是否替代 frp
 
-已配置后每次启动都会跳过提问；`npm start -- --setup` 重新配置（现有值作默认，回车保留）；`--mode frp|ssh|lan` 切换模式。也支持命令行标志：`--server`、`--server-port`、`--auth-token`、`--ssh-host`、`--ssh-port`、`--ssh-user`、`--ssh-key`、`--domain`（`--help` 查看全部）。
+已配置后每次启动都会跳过提问；`npm start -- --setup` 重新配置（现有值作默认，回车保留）；`--mode frp|ssh|lan|cf` 切换模式。也支持命令行标志：`--server`、`--server-port`、`--auth-token`、`--ssh-host`、`--ssh-port`、`--ssh-user`、`--ssh-key`、`--domain`（`--help` 查看全部）。
 
-网关首次运行生成随机访问令牌写入 `config.json`，启动日志会打印登录链接（lan 模式是局域网地址）：
+网关首次运行生成随机访问令牌写入 `config.json`，启动日志会打印登录链接（lan 模式是局域网地址；cf 模式由 `[start]` 抓到临时域名后打印）：
 
 ```
-https://<你的域名>/?t=<token>          # frp / ssh 模式
-http://<本机局域网IP>:3088/?t=<token>   # lan 模式
+https://<你的域名>/?t=<token>                    # frp / ssh 模式
+http://<本机局域网IP>:3088/?t=<token>             # lan 模式
+https://<随机串>.trycloudflare.com/?t=<token>     # cf 模式（每次启动变化）
 ```
 
 手机浏览器打开一次该链接 → 种下一年有效的 HttpOnly Cookie → 之后直接访问该地址即可。
 
 ### 服务器侧
 
-**lan 模式无需服务器**。frp/ssh 模式：反代（Nginx/Caddy）把域名 HTTPS 流量转到隧道暴露的端口，并带上 `X-Forwarded-Proto: https` 头（用于给 Cookie 加 `Secure`）。
+**lan / cf 模式无需服务器**。frp/ssh 模式：反代（Nginx/Caddy）把域名 HTTPS 流量转到隧道暴露的端口，并带上 `X-Forwarded-Proto: https` 头（用于给 Cookie 加 `Secure`；cf 模式由网关强制，不依赖此头）。
 
 反代必须调大读超时：dsh 的 `/api/commands/execute`（如 /compact）是**同步长任务**，响应在命令执行完才一次性返回，期间没有任何字节流动——Nginx 默认 `proxy_read_timeout 60s` 会直接 504。Nginx 在该 location 加：
 
@@ -78,6 +83,7 @@ proxy_send_timeout 600s;
 - **Android**：用 Chrome/Edge 打开（厂商自带浏览器大多阉割了 PWA 安装），页面上点击几下并停留 30 秒以上（Chrome 的互动启发式硬条件），菜单 →「安装应用」
 - 已知限制：无 Google Play 服务的 ROM 上 Chrome 无法铸造 WebAPK，会退化为普通快捷方式
 - **lan 模式降级**：局域网是 HTTP 明文，浏览器不会注册 Service Worker、Android 无法安装为完整 PWA（退化为浏览器快捷方式）；iPhone 仍可「添加到主屏幕」成 web clip。完整 PWA 安装只在 frp/ssh 的 HTTPS 下可用。另：HTTP 非安全上下文下浏览器不提供 `crypto.randomUUID`，网关已在 lan 模式注入 polyfill（`getRandomValues` 实现），页面功能（选工作区/改设置等）不受影响
+- **cf 模式不建议安装**：HTTPS 下 PWA 机制本身可用，但临时域名每次启动都换，安装产物随旧 origin 作废——直接用浏览器标签页即可
 
 ## 配置
 
@@ -88,9 +94,9 @@ proxy_send_timeout 600s;
 | env | `DSH_GATE_CONFIG` | 同目录 `config.json` | 配置文件路径（测试/多实例用） |
 | env | `DSH_GATE_TARGET_PORT` | `3080` | DSH Web UI 端口 |
 | env | `DSH_GATE_TOKEN` | — | 访问令牌（设置后不再读写 config.json） |
-| env | `DSH_GATE_DOMAIN` | — | 公网域名，打印登录链接用（`config.json` 的 `domain` 同效；lan 模式忽略） |
+| env | `DSH_GATE_DOMAIN` | — | 公网域名，打印登录链接用（`config.json` 的 `domain` 同效；lan/cf 模式忽略） |
 | `config.json` | `token` / `port` / `targetPort` / `domain` | — | 同上，文件形式；`domain` 由 setup 写入 |
-| `config.json` | `mode` | `frp` | 访问模式：`frp` / `ssh` / `lan`（缺省 frp，向后兼容） |
+| `config.json` | `mode` | `frp` | 访问模式：`frp` / `ssh` / `lan` / `cf`（缺省 frp，向后兼容；cf 无额外字段） |
 | `config.json` | `ssh.host` / `ssh.port` / `ssh.user` / `ssh.keyPath` | — | ssh 模式专用：服务器地址 / 端口（默认 22）/ 用户名 / 私钥路径 |
 
 ## 安全模型
@@ -100,6 +106,8 @@ proxy_send_timeout 600s;
 **对公网**：攻击面只有令牌登录一处。令牌 192 bit 随机、timing-safe 比较；Cookie `HttpOnly + SameSite=Lax`，HTTPS 下自动 `Secure`；错误令牌尝试全局 30 次/分钟软限流（不依赖 IP，frp 拓扑下安全）。`/pwa/*` 静态资产（图标/manifest/sw）豁免认证——iOS 安装图标时不带 Cookie，且这些文件无敏感信息。
 
 **lan 模式**：连接是 HTTP 明文，令牌与全部流量在同网可被嗅探（威胁模型是「可信家庭 Wi-Fi」）；防火墙是唯一网络边界（绑定 `0.0.0.0` 时 Windows 会弹提示，请只放行「专用网络」）。
+
+**cf 模式**：TLS 在 Cloudflare 边缘终止，**会话明文对 CF 可见**（性质同 frp/ssh 下 TLS 在自己的服务器终止，只是信任对象换成了 CF）；临时域名随机不可猜测，但正式认证仍只有网关令牌一道，不要将链接泄露给不可信方；quick tunnel 官方定位为测试用途，无 SLA。
 
 ## 测试
 
@@ -114,17 +122,19 @@ npm test   # 起 mock 上游 + 网关子进程：认证/头清洗/HTML 注入顺
 | 路径 | 作用 |
 | --- | --- |
 | `gateway.mjs` | 网关本体：令牌认证 + 反代 + WS 隧道 + manifest 注入 |
-| `start.mjs` / `start.bat` | 一键启动（dsh web + 网关 + frp/ssh 隧道或 lan 直连，单窗口） |
-| `setup.mjs` | 首次运行交互式配置（访问模式 frp/ssh/lan + 公网域名 + SSH 连通性自检） |
+| `start.mjs` / `start.bat` | 一键启动（dsh web + 网关 + frp/ssh/cf 隧道或 lan 直连，单窗口） |
+| `setup.mjs` | 首次运行交互式配置（访问模式 frp/ssh/lan/cf + 公网域名 + SSH 连通性自检） |
 | `patch-dsh.mjs` | 幂等补丁 DSH client-runtime（修复提问弹窗被重连刷没） |
 | `pwa/` | manifest.json、最小 service worker、图标（dsh 官方鲸鱼 logo） |
 | `frp/frpc.toml.example` | frp 客户端配置模板 |
+| `cf/` | cloudflared 二进制放置目录（下载指引见 `cf/README.md`） |
 | `test/gateway.test.mjs` | 冒烟测试 |
 
 ## Roadmap
 
 - [ ] 任务完成 Web Push 通知（iPhone 需先安装 PWA；触发端预留为网关上受信端点 + dsh 侧迷你插件订阅 turn-end 事件）
 - [ ] 多机路由（按电脑分子域名，frpc 配置模板化）
+- [ ] cf 模式升级 named tunnel（固定域名，需自有域名整体 NS 托管到 Cloudflare；代码同一条分支，仅加配置）
 
 ## 致谢
 

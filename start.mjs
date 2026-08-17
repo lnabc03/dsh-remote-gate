@@ -1,8 +1,9 @@
-// dsh-remote-gate 一键启动：dsh web + 网关 + 隧道（frp / ssh 反向隧道）或局域网直连，全部收进当前窗口
+// dsh-remote-gate 一键启动：dsh web + 网关 + 隧道（frp / ssh 反向隧道 / cloudflared）或局域网直连，全部收进当前窗口
 //
 // 策略：
 //   - dsh web：启动前先探 3080，已在运行则跳过；崩溃后自动重启（最多 5 次，间隔 3s）
 //   - 网关：退出则整体退出；frpc：退出则整体退出（隧道断了网关不能裸跑）
+//   - cloudflared（cf 模式）：致命，退出团灭——重拨必然换新临时域名，旧入口静默失效不如明说
 //   - ssh 反向隧道：非致命，退出后自动重拨（弱网/服务器重启不断链）
 //   - lan 模式：无隧道，网关绑 0.0.0.0 局域网直连（首次可能弹防火墙提示）
 //   - Ctrl+C 同时终止全部（Windows 下对派生树用 taskkill /T）
@@ -12,7 +13,7 @@ import path from 'node:path'
 import fs from 'node:fs'
 import http from 'node:http'
 import { fileURLToPath } from 'node:url'
-import { ensureConfigured, frpcBinaryName, buildSshReverseArgs, readConfigJson, defaultSshKeyPath } from './setup.mjs'
+import { ensureConfigured, frpcBinaryName, cloudflaredBinaryName, buildSshReverseArgs, readConfigJson, defaultSshKeyPath } from './setup.mjs'
 import { patchDsh } from './patch-dsh.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -21,9 +22,20 @@ const DSH_PORT = 3080
 // frpc 日志过滤：这些是已知无害的告警（如 work connection pool is full），不打印。
 const FRPC_IGNORE = ['work connection pool is full']
 
+// cloudflared 日志过滤：quick tunnel 的边框/公告行（URL 由 startCf 抓取后自行打印更干净的登录链接）
+const CF_IGNORE = ['Your quick Tunnel has been created', 'trycloudflare.com', '+---', 'Thank you for trying Cloudflare Tunnel']
+
+// 从 cloudflared 输出里抓 quick tunnel 分配的临时域名
+const CF_URL_RE = /https:\/\/[a-z0-9-]+\.trycloudflare\.com/i
+function extractCfUrl(line) {
+  const m = String(line).match(CF_URL_RE)
+  return m ? m[0] : null
+}
+
 function shouldIgnoreLine(tag, line) {
-  if (tag !== 'frpc') return false
-  return FRPC_IGNORE.some((needle) => line.includes(needle))
+  if (tag === 'frpc') return FRPC_IGNORE.some((needle) => line.includes(needle))
+  if (tag === 'cf') return CF_IGNORE.some((needle) => line.includes(needle))
+  return false
 }
 
 const procs = []
@@ -50,7 +62,7 @@ function shutdown(code = 0) {
   setTimeout(() => process.exit(code), 500).unref()
 }
 
-function attach(p, tag) {
+function attach(p, tag, onLine) {
   for (const [stream, out] of [[p.stdout, process.stdout], [p.stderr, process.stderr]]) {
     if (!stream) continue
     let buf = ''
@@ -58,9 +70,17 @@ function attach(p, tag) {
       buf += d
       const lines = buf.split('\n')
       buf = lines.pop()
-      for (const line of lines) if (!shouldIgnoreLine(tag, line)) out.write(`${padTag(tag)}${line.replace(/\r$/, '')}\n`)
+      for (const line of lines) {
+        if (onLine) onLine(line)
+        if (!shouldIgnoreLine(tag, line)) out.write(`${padTag(tag)}${line.replace(/\r$/, '')}\n`)
+      }
     })
-    stream.on('end', () => { if (buf && !shouldIgnoreLine(tag, buf)) out.write(`${padTag(tag)}${buf.replace(/\r$/, '')}\n`) })
+    stream.on('end', () => {
+      if (buf) {
+        if (onLine) onLine(buf)
+        if (!shouldIgnoreLine(tag, buf)) out.write(`${padTag(tag)}${buf.replace(/\r$/, '')}\n`)
+      }
+    })
   }
   procs.push(p)
   return p
@@ -165,6 +185,55 @@ function startSsh(sshCfg, retryCount = 0) {
   })
 }
 
+// cf 模式：cloudflared quick tunnel，致命进程（退出团灭）。
+// 重拨必然分配新临时域名、旧入口静默失效——与其假装还活着，不如团灭让用户重启拿新链接。
+function cloudflaredPath() {
+  const p = path.join(__dirname, 'cf', cloudflaredBinaryName())
+  return fs.existsSync(p) ? p : null
+}
+
+// cloudflared 分配域名通常要几秒，此时网关早已把 token 落盘；仍做短重试兜底竞态
+function printCfLoginLink(url, attempt = 0) {
+  let cfg = {}
+  try { cfg = readConfigJson(fs.readFileSync(path.join(__dirname, 'config.json'), 'utf8')) } catch { }
+  if (cfg.token) {
+    say('start', `登录链接: ${url}/?t=${cfg.token}`)
+    say('start', '注意：cf 临时域名仅本次运行有效，重启后需重新发送新链接到手机')
+    return
+  }
+  if (attempt >= 10) {
+    say('start', `cf 域名已分配: ${url}（未读到令牌，登录链接见 [gate] 输出）`)
+    return
+  }
+  setTimeout(() => printCfLoginLink(url, attempt + 1), 500).unref()
+}
+
+function startCf() {
+  const bin = cloudflaredPath()
+  if (!bin) {
+    sayErr('start', `未找到 cf/${cloudflaredBinaryName()}；请从 https://github.com/cloudflare/cloudflared/releases 下载（Windows 选 cloudflared-windows-amd64.exe，改名后放入 cf/ 目录）`)
+    shutdown(1)
+    return
+  }
+  const p = spawn(bin, ['--no-autoupdate', 'tunnel', '--url', 'http://127.0.0.1:3088'], {
+    stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
+  })
+  let announced = false
+  attach(p, 'cf', (line) => {
+    if (announced) return
+    const url = extractCfUrl(line)
+    if (!url) return
+    announced = true
+    printCfLoginLink(url)
+  })
+  p.on('error', (err) => { sayErr('start', `cloudflared 启动失败: ${err.message}`); shutdown(1) })
+  p.on('exit', (code, signal) => {
+    if (shuttingDown) return
+    say('start', `cf 隧道退出 (code=${code} signal=${signal})，临时域名已失效，一并关闭其余进程（重启后会分配新域名，需重新发链接）`)
+    shutdown(code ?? 0)
+  })
+}
+
 async function main() {
   // 1) 首次运行交互式配置（隧道模式 frp/ssh + 公网域名）；frpc/ssh 缺失或自检失败时退出并提示
   const setup = await ensureConfigured(process.argv.slice(2))
@@ -198,7 +267,7 @@ async function main() {
   }
   startVital({ tag: 'gate', cmd: process.execPath, args: [path.join(__dirname, 'gateway.mjs')] })
 
-  // 隧道：frp（致命，退出团灭）/ ssh 反向隧道（非致命，退出自动重拨）/ lan（无隧道，网关直连局域网）
+  // 隧道：frp（致命，退出团灭）/ ssh 反向隧道（非致命，退出自动重拨）/ lan（无隧道，网关直连局域网）/ cf（cloudflared 临时隧道，致命）
   let cfg = {}
   try { cfg = readConfigJson(fs.readFileSync(path.join(__dirname, 'config.json'), 'utf8')) } catch { /* 无配置则默认 frp */ }
   if (cfg.mode === 'ssh') {
@@ -206,6 +275,9 @@ async function main() {
     startSsh(cfg.ssh || {})
   } else if (cfg.mode === 'lan') {
     say('start', '模式: lan（局域网直连，无隧道；首次若弹防火墙提示请点「允许」）')
+  } else if (cfg.mode === 'cf') {
+    say('start', '模式: cf（Cloudflare 临时隧道，无需服务器；每次启动域名随机）')
+    startCf()
   } else {
     say('start', '模式: frp（隧道）')
     startVital({ tag: 'frpc', cmd: path.join(__dirname, 'frp', frpcBinaryName()), args: ['-c', path.join(__dirname, 'frp', 'frpc.toml')] })
@@ -219,4 +291,4 @@ if (isMain) {
   main()
 }
 
-export { shouldIgnoreLine, FRPC_IGNORE }
+export { shouldIgnoreLine, FRPC_IGNORE, CF_IGNORE, extractCfUrl }

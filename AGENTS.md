@@ -1,6 +1,6 @@
 # CLAUDE.md — dsh-remote-gate
 
-最小化 DSH（DeepSeek Harness）远程访问网关：手机/平板经公网服务器（frp 或 SSH 反向隧道中转）或同一局域网直连，安全操控本机 DSH Web UI，可安装为 PWA。私有仓库，计划完善后转公开。
+最小化 DSH（DeepSeek Harness）远程访问网关：手机/平板经公网服务器（frp 或 SSH 反向隧道中转）、Cloudflare 临时隧道（cf 模式，零服务器）或同一局域网直连，安全操控本机 DSH Web UI，可安装为 PWA。私有仓库，计划完善后转公开。
 
 ## 技术栈与形态
 
@@ -17,20 +17,22 @@
 4. **`/pwa/*` 静态资产豁免认证**。iOS「添加到主屏幕」抓图标/manifest 不带会话 Cookie，拦 401 会丢图标。仅限这个前缀下的白名单文件，路径穿越防护不可删；未来 `/pwa/push/*` 这类动态端点必须另行鉴权，不能跟着豁免。
 5. 注入改写响应体时，必须删掉 `Transfer-Encoding`/`Connection`/`Keep-Alive` 并重写 `Content-Length`——TE 与 CL 并存会被浏览器 fetch 拒收（踩过）。前提是导航请求的 `Accept-Encoding` 被摘掉（见约束 2）让上游返回未压缩 HTML，压缩字节不可注入。
 6. **dsh 必须由 `start.mjs` 直接 `spawn(node, [dshBin, 'web'])` 启动，绝不能走 `npx`/`shell` 中转**。Windows 点窗口 X 关控制台发的是 `CTRL_CLOSE_EVENT`，Node 不触发 `SIGINT`/`SIGTERM`，`shutdown()` 里的 `taskkill /T` 根本不执行；`npx → cmd → dsh web` 深层进程脱离控制台成为孤儿（下次 `probeDsh` 复用残留，补丁/改动都不生效）。直接子进程则随控制台一起退出，Ctrl+C 的 `taskkill /T` 也少两层中间进程、杀得更干净。
-7. **ssh 反向隧道**：`ssh -R 3088:127.0.0.1:3088`，`remotePort` 固定 3088（服务器反代硬编码指向它，别改）。认证只用密钥（复用已有私钥，`-i` 指定路径），`BatchMode=yes` 拒绝密码交互；`StrictHostKeyChecking=yes`（预先录入 known_hosts，否则拒连——防中间人），**绝不放宽成 `accept-new`/`no`**。重连在 Node 内手写（退出 3s 重拨、不团灭），**不要引入 autossh**（零依赖约束）。ssh 进程非致命、frpc 致命：别把 ssh 的退出语义与 frpc 的「退出=团灭」混同。
+7. **ssh 反向隧道**：`ssh -R 3088:127.0.0.1:3088`，`remotePort` 固定 3088（服务器反代硬编码指向它，别改）。认证只用密钥（复用已有私钥，`-i` 指定路径），`BatchMode=yes` 拒绝密码交互；`StrictHostKeyChecking=yes`（预先录入 known_hosts，否则拒连——防中间人），**绝不放宽成 `accept-new`/`no`**。重连在 Node 内手写（退出 3s 重拨、不团灭），**不要引入 autossh**（零依赖约束）。ssh 进程非致命、frpc/cloudflared 致命：别把 ssh 的退出语义与 frpc/cf 的「退出=团灭」混同。
 8. **lan 局域网模式**：`mode:"lan"` 下网关绑 `0.0.0.0`（`DSH_GATE_BIND` 可覆盖），`start.mjs` 不启动任何隧道。明文 HTTP 是已接受的取舍（Android 丢完整 PWA + SW，iPhone 仍可 web clip；令牌可被同网嗅探）——**不要试图为 lan 加自签 HTTPS / 本地 CA**。防火墙是唯一网络边界：只提示用户放行「专用网络」，**程序不改系统防火墙**。仍不引入按 IP 的逻辑（约束 1 不因 lan 出现真实来源 IP 而破例）。
+9. **cf 模式（Cloudflare quick tunnel）**：`mode:"cf"` 下 `start.mjs` 拉起 `cf/cloudflared`（`--no-autoupdate tunnel --url http://127.0.0.1:3088`），无账号/域名/凭证。临时域名每次启动随机 → **登录链接必须由 start.mjs 抓 URL 后打印**（网关无从得知域名，别在 gateway.mjs 里瞎拼）。cloudflared 退出 = 域名失效 = **团灭**（重拨必换 URL，与 ssh 的「重拨入口不变」语义相反，勿混用）。CF 边缘不保证发 `X-Forwarded-Proto`，网关 cf 模式用 `FORCE_HTTPS` 强制 Cookie `Secure`——**勿删**。CF 免费层 100s 无响应硬超时（524）是产品限制，compact 类同步长命令会挂，属已知取舍。
 
 ## 文件与职责
 
 | 路径 | 职责 | 改动注意 |
 | --- | --- | --- |
 | `gateway.mjs` | 令牌认证 + 反代 + WS 隧道 + manifest 注入 + 流量统计（每小时一行 ↓↑ 字节，静默时段不刷） | 改完必跑 `npm test` |
-| `start.mjs` | 拉起 dsh web + 网关 + 隧道（frp/ssh）或 lan 直连，单窗口日志加前缀 | dsh 崩溃自动重启；网关/frpc 退出则团灭，ssh 退出则 3s 重拨（不团灭，见约束 7），lan 模式不启动隧道；dsh 直接 spawn node bin.js（见约束 6），杀派生树用 `taskkill /T` |
-| `setup.mjs` | 首次运行交互式配置（访问模式 frp/ssh/lan + 公网域名 + SSH 连通性自检） | frp 全量重写 `frpc.toml`；ssh 写 `config.json` 的 `mode`/`ssh.*`；lan 只写 `mode:"lan"`；改校验/渲染/ssh 参数必跑 `npm test` |
+| `start.mjs` | 拉起 dsh web + 网关 + 隧道（frp/ssh/cf）或 lan 直连，单窗口日志加前缀 | dsh 崩溃自动重启；网关/frpc/cloudflared 退出则团灭，ssh 退出则 3s 重拨（不团灭，见约束 7），lan 模式不启动隧道；cf 临时域名由 startCf 抓 cloudflared 日志（`extractCfUrl`）后拼令牌打印登录链接；dsh 直接 spawn node bin.js（见约束 6），杀派生树用 `taskkill /T` |
+| `setup.mjs` | 首次运行交互式配置（访问模式 frp/ssh/lan/cf + 公网域名 + SSH 连通性自检） | frp 全量重写 `frpc.toml`；ssh 写 `config.json` 的 `mode`/`ssh.*`；lan/cf 只写 `mode`；cf 额外检查 `cf/cloudflared` 二进制存在（缺失则给下载指引并退出）；改校验/渲染/ssh 参数必跑 `npm test` |
 | `patch-dsh.mjs` | 幂等补丁 DSH client-runtime（修复提问弹窗被重连刷没） | 锚点严格 LF + Tab；改锚点先跑 `npm test` |
 | `pwa/sw.js` | 最小 SW，只为满足 Chrome 可安装性；**不做缓存**（下拉误刷新类 bug 的教训），v2 推送的 push 事件也加在这里 | |
 | `pwa/icons/` | dsh 官方鲸鱼 logo（白底黑鲸，maskable 版缩到 68% 保安全区） | 源文件是 dsh 的 `/favicon.svg` |
 | `frp/frpc.toml.example` | 隧道配置模板 | 真实 `frpc.toml` 含 token，已 gitignore |
+| `cf/` | cloudflared 二进制放置目录 + 下载指引 | 二进制已 gitignore；下载方式见 `cf/README.md` |
 
 ## 密钥纪律
 
@@ -38,7 +40,7 @@
 
 ## 隧道拓扑要点
 
-- 网关绑址按 `config.json.mode`（`DSH_GATE_BIND` 可覆盖）：frp/ssh → `127.0.0.1`（公网入口 = 服务器反代，TLS 终止 + `X-Forwarded-Proto: https` 决定 Cookie 是否 `Secure`），lan → `0.0.0.0`（局域网直连，HTTP 明文）。两种隧道都把服务器 `127.0.0.1:3088` 回灌到本机 gateway，反代侧无感知
+- 网关绑址按 `config.json.mode`（`DSH_GATE_BIND` 可覆盖）：frp/ssh/cf → `127.0.0.1`（公网入口 = 服务器反代或 CF 边缘，TLS 终止；frp/ssh 靠 `X-Forwarded-Proto: https` 决定 Cookie 是否 `Secure`，cf 由 `FORCE_HTTPS` 强制），lan → `0.0.0.0`（局域网直连，HTTP 明文）。frp/ssh 两种隧道都把服务器 `127.0.0.1:3088` 回灌到本机 gateway，反代侧无感知；cf 由本机 cloudflared 出站直连 CF 边缘
 - **frp**：frps 端 `transport.maxPoolCount` 必须与 frpc 端 `transport.poolCount`（当前 20）对齐，否则刷 `work connection pool is full`（移动端加载 SPA 并发几十个连接所致）
 - **ssh**：服务器需 sshd + `AllowTcpForwarding yes`，无需 `GatewayPorts`（反向隧道默认只绑 loopback）；`remotePort` 固定 3088；私钥公钥需预先加入 `authorized_keys`，首次连接前先手动 `ssh` 一次录入 known_hosts。已实测基本可用（稳定性略逊于 frp、流式输出略卡，属预期）
 - **lan**：无需服务器/隧道/字段；`start.mjs` 跳过隧道分支；网关打印 `http://<局域网IP>:3088/?t=…`。IP 用 UDP connect 探测默认路由网卡得出（直接枚举第一个会踩中 VMware/Hyper-V 虚拟网卡，手机永远够不到——踩过），横幅附其余候选 IP 供手动替换。明文 + 防火墙提示已文档化；校园网/企业 Wi-Fi 常开 AP 客户端隔离导致同网设备互不可达（环境问题，开热点排除）。明文 HTTP 是非安全上下文，浏览器不提供 `crypto.randomUUID`（dsh 前端选工作区/改设置会抛错），lan 模式注入 `getRandomValues` polyfill 解决——**勿删**，frp/ssh（HTTPS）不注入。热点环境真机已实测可用（进页面/选工作区/改设置均正常）
