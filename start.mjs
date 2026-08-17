@@ -22,8 +22,13 @@ const DSH_PORT = 3080
 // frpc 日志过滤：这些是已知无害的告警（如 work connection pool is full），不打印。
 const FRPC_IGNORE = ['work connection pool is full']
 
-// cloudflared 日志过滤：quick tunnel 的边框/公告行（URL 由 startCf 抓取后自行打印更干净的登录链接）
-const CF_IGNORE = ['Your quick Tunnel has been created', 'trycloudflare.com', '+---', 'Thank you for trying Cloudflare Tunnel']
+// cloudflared 日志过滤：quick tunnel 的边框/公告行（URL 由 startCf 抓取后自行打印更干净的登录链接）。
+// 新版 cloudflared 还会打连通性预检表等「信息框」（ INF | ... / INF +---... 形式），一行正则全部收敛；
+// 预检明细与框内容重复，只留 precheck complete 汇总行。
+// "canceled by remote with error code 0"：HTTP/2 NO_ERROR，浏览器/边缘正常取消在飞请求
+// （跳转掐请求、SSE/WS 重连、手机切网/锁屏），cloudflared 误打 ERR 级别，属已知无害噪声。
+const CF_IGNORE = ['Your quick Tunnel has been created', 'trycloudflare.com', 'Thank you for trying Cloudflare Tunnel', 'precheck component=', 'canceled by remote with error code 0']
+const CF_IGNORE_RE = / INF [+|]/
 
 // 从 cloudflared 输出里抓 quick tunnel 分配的临时域名
 const CF_URL_RE = /https:\/\/[a-z0-9-]+\.trycloudflare\.com/i
@@ -34,7 +39,7 @@ function extractCfUrl(line) {
 
 function shouldIgnoreLine(tag, line) {
   if (tag === 'frpc') return FRPC_IGNORE.some((needle) => line.includes(needle))
-  if (tag === 'cf') return CF_IGNORE.some((needle) => line.includes(needle))
+  if (tag === 'cf') return CF_IGNORE_RE.test(line) || CF_IGNORE.some((needle) => line.includes(needle))
   return false
 }
 
@@ -291,4 +296,4 @@ if (isMain) {
   main()
 }
 
-export { shouldIgnoreLine, FRPC_IGNORE, CF_IGNORE, extractCfUrl }
+export { shouldIgnoreLine, FRPC_IGNORE, CF_IGNORE, CF_IGNORE_RE, extractCfUrl }

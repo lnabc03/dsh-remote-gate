@@ -25,7 +25,7 @@
 
 | 路径 | 职责 | 改动注意 |
 | --- | --- | --- |
-| `gateway.mjs` | 令牌认证 + 反代 + WS 隧道 + manifest 注入 + 流量统计（每小时一行 ↓↑ 字节，静默时段不刷） | 改完必跑 `npm test` |
+| `gateway.mjs` | 令牌认证 + 反代 + WS 隧道 + manifest 注入 + 流量统计（每小时一行 ↓↑ 字节 + 下行 top3 路径热点榜，静默时段不刷） | 改完必跑 `npm test`；下行口径 = 写回浏览器侧字节（post-gzip，即过隧道计费口径），勿改回上游侧计数 |
 | `start.mjs` | 拉起 dsh web + 网关 + 隧道（frp/ssh/cf）或 lan 直连，单窗口日志加前缀 | dsh 崩溃自动重启；网关/frpc/cloudflared 退出则团灭，ssh 退出则 3s 重拨（不团灭，见约束 7），lan 模式不启动隧道；cf 临时域名由 startCf 抓 cloudflared 日志（`extractCfUrl`）后拼令牌打印登录链接；dsh 直接 spawn node bin.js（见约束 6），杀派生树用 `taskkill /T` |
 | `setup.mjs` | 首次运行交互式配置（访问模式 frp/ssh/lan/cf + 公网域名 + SSH 连通性自检） | frp 全量重写 `frpc.toml`；ssh 写 `config.json` 的 `mode`/`ssh.*`；lan/cf 只写 `mode`；cf 额外检查 `cf/cloudflared` 二进制存在（缺失则给下载指引并退出）；改校验/渲染/ssh 参数必跑 `npm test` |
 | `patch-dsh.mjs` | 幂等补丁 DSH client-runtime（修复提问弹窗被重连刷没） | 锚点严格 LF + Tab；改锚点先跑 `npm test` |

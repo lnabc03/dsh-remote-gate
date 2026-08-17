@@ -139,9 +139,14 @@ function cleanHeaders(req) {
 }
 
 // ---- 流量统计：验证压缩收益；仅累计打印，不影响转发 -------------------------------
-const meter = { up: 0, down: 0, upTotal: 0, downTotal: 0 }
+// 口径：下行数「写回浏览器」一侧的字节（post-gzip），即真实过隧道/计费的字节；
+// 上行数请求体原始字节（本来就极小）。paths 记录下行按路径分布，供每小时热点榜。
+const meter = { up: 0, down: 0, upTotal: 0, downTotal: 0, paths: new Map() }
 const meterUp = (n) => { meter.up += n; meter.upTotal += n }
-const meterDown = (n) => { meter.down += n; meter.downTotal += n }
+function meterDown(pathKey, n) {
+  meter.down += n; meter.downTotal += n
+  meter.paths.set(pathKey, (meter.paths.get(pathKey) || 0) + n)
+}
 function fmtBytes(n) {
   if (n >= 1 << 30) return (n / (1 << 30)).toFixed(2) + ' GB'
   if (n >= 1 << 20) return (n / (1 << 20)).toFixed(1) + ' MB'
@@ -150,8 +155,10 @@ function fmtBytes(n) {
 }
 setInterval(() => {
   if (meter.up + meter.down === 0) return // 静默时段不刷日志
-  console.log(`流量: 最近 1h ↓${fmtBytes(meter.down)} ↑${fmtBytes(meter.up)}；累计 ↓${fmtBytes(meter.downTotal)} ↑${fmtBytes(meter.upTotal)}`)
-  meter.up = 0; meter.down = 0
+  const top = [...meter.paths.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3)
+    .map(([p, n]) => (p.length > 60 ? '…' + p.slice(-59) : p) + ' ' + fmtBytes(n)).join(', ')
+  console.log(`流量: 最近 1h ↓${fmtBytes(meter.down)} ↑${fmtBytes(meter.up)}；累计 ↓${fmtBytes(meter.downTotal)} ↑${fmtBytes(meter.upTotal)}` + (top ? `；热点: ${top}` : ''))
+  meter.up = 0; meter.down = 0; meter.paths.clear()
 }, 3600_000).unref()
 
 // ---- auth failure soft limit（防在线爆破；frp 下所有来源都是 127.0.0.1，故按全局计） ----
@@ -259,12 +266,22 @@ const GZIP_MIN = 1024 // 太小的响应压缩反而膨胀
 
 function forward(req, res) {
   const clientGzip = /\bgzip\b/.test(String(req.headers['accept-encoding'] || ''))
+  // 下行计在写回浏览器这一侧（post-gzip 才是真实过隧道字节）；包装 write/end 以覆盖
+  // pipe 透传、缓冲改写、超上限回退三种路径
+  const pathKey = String(req.url || '').split('?')[0]
+  const resWrite = res.write.bind(res)
+  const resEnd = res.end.bind(res)
+  const countChunk = (chunk) => {
+    if (!chunk || typeof chunk === 'function') return
+    meterDown(pathKey, typeof chunk === 'string' ? Buffer.byteLength(chunk) : chunk.length)
+  }
+  res.write = (chunk, ...rest) => { countChunk(chunk); return resWrite(chunk, ...rest) }
+  res.end = (chunk, ...rest) => { countChunk(chunk); return resEnd(chunk, ...rest) }
   const upstream = http.request({
     host: TARGET_HOST, port: TARGET_PORT,
     method: req.method, path: req.url,
     headers: cleanHeaders(req),
   }, (upRes) => {
-    upRes.on('data', (c) => meterDown(c.length)) // 与 pipe/缓冲并存，仅计数
     const h = { ...upRes.headers }
     const ct = String(h['content-type'] || '')
     const ce = String(h['content-encoding'] || '')
@@ -371,7 +388,7 @@ server.on('upgrade', (req, socket, head) => {
       upstream.write(raw)
       if (head && head.length) upstream.write(head)
       socket.on('data', (c) => meterUp(c.length)) // WS 帧计数（pipe 之外并行监听，不消费）
-      upstream.on('data', (c) => meterDown(c.length))
+      upstream.on('data', (c) => meterDown(String(req.url || '').split('?')[0], c.length))
       socket.pipe(upstream)
       upstream.pipe(socket)
     } catch { kill() }
