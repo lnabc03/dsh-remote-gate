@@ -5,8 +5,8 @@
 
 ## 0. 基线（每次开始前）
 
-- [ ] `npm test` 全绿（35/35）
-- [ ] `git status` 干净，无 `config.json` / `frp/frpc.toml` / `.dsh-usage-stats.json` 泄漏
+- [x] `npm test` 全绿（35/35）
+- [x] `git status` 干净，无 `config.json` / `frp/frpc.toml` / `.dsh-usage-stats.json` 泄漏
 
 ---
 
@@ -14,46 +14,46 @@
 
 ### 1.1 服务器侧前置（公网服务器，一次性配置）
 
-- [ ] sshd 已运行：`systemctl status sshd`（或 `service ssh status`）为 active
-- [ ] `AllowTcpForwarding yes`：`sshd -T | grep -i allowtcpforwarding` 输出 `yes`
-- [ ] 无需 `GatewayPorts`（反向隧道默认只绑 127.0.0.1，可确认其保持默认）
-- [ ] 目标账号存在且可登录
-- [ ] 本机公钥已加入该账号 `~/.ssh/authorized_keys`（内容 = 本机 `~/.ssh/id_ed25519.pub`；文件权限 600）
-- [ ] 反代已配：Nginx/Caddy 把域名 HTTPS 流量转到 `127.0.0.1:3088`，并带 `X-Forwarded-Proto: https`
+- [x] sshd 已运行：`systemctl status sshd`（或 `service ssh status`）为 active
+- [x] `AllowTcpForwarding yes`：`sshd -T | grep -i allowtcpforwarding` 输出 `yes`
+- [x] 无需 `GatewayPorts`（反向隧道默认只绑 127.0.0.1，可确认其保持默认）
+- [x] 目标账号存在且可登录
+- [x] 本机公钥已加入该账号 `~/.ssh/authorized_keys`（内容 = 本机 `~/.ssh/id_ed25519.pub`；文件权限 600）
+- [x] 反代已配：Nginx/Caddy 把域名 HTTPS 流量转到 `127.0.0.1:3088`，并带 `X-Forwarded-Proto: https`
 
 ### 1.2 本机侧前置
 
-- [ ] OpenSSH 客户端存在：`ssh -V`
-- [ ] 私钥存在：`~/.ssh/id_ed25519`（或你配置的路径）
-- [ ] 首次手动录入主机指纹：`ssh -i ~/.ssh/id_ed25519 <user>@<host>`，确认指纹后能登录
-- [ ] （连不上时排查：authorized_keys、服务器防火墙放行 22、sshd 端口）
+- [x] OpenSSH 客户端存在：`ssh -V`
+- [x] 私钥存在：`~/.ssh/id_ed25519`（或你配置的路径）
+- [x] 首次手动录入主机指纹：`ssh -i ~/.ssh/id_ed25519 <user>@<host>`，确认指纹后能登录
+- [x] （连不上时排查：authorized_keys、服务器防火墙放行 22、sshd 端口）
 
 ### 1.3 配置
 
-- [ ] `npm start -- --setup`，选 `ssh`，填 host / port / user / keyPath / 域名
-- [ ] setup 自检打印「配置完成：隧道: ssh → user@host:port」且未报错退出
-- [ ] `config.json` 出现 `mode:"ssh"` 与 `ssh:{host,port,user,keyPath}`；私钥本体不在仓库内（config 只存路径）
+- [x] `npm start -- --setup`，选 `ssh`，填 host / port / user / keyPath / 域名
+- [x] setup 自检打印「配置完成：隧道: ssh → user\@host:port」且未报错退出
+- [x] `config.json` 出现 `mode:"ssh"` 与 `ssh:{host,port,user,keyPath}`；私钥本体不在仓库内（config 只存路径）
 
 ### 1.4 启动与访问
 
-- [ ] 启动日志出现 `[ssh]` 前缀，无 `[frpc]`
-- [ ] 手机（公网 / 移动数据）打开 `https://<域名>/?t=<token>` → 302 → 进入 DSH，可正常对话
-- [ ] Android 可安装为完整 PWA（HTTPS + Service Worker 生效）
-- [ ] iPhone「添加到主屏幕」成完整 PWA（HTTPS）
+- [x] 启动日志出现 `[ssh]` 前缀，无 `[frpc]`
+- [x] 手机（公网 / 移动数据）打开 `https://<域名>/?t=<token>` → 302 → 进入 DSH，可正常对话
+- [x] Android 可安装为完整 PWA（HTTPS + Service Worker 生效）
+- [x] iPhone「添加到主屏幕」成完整 PWA（HTTPS）
 
 ### 1.5 断线重连（关键行为）
 
-- [ ] 隧道正常时，本机 `taskkill /F /IM ssh.exe`（或服务器 `systemctl restart sshd`）
-- [ ] 日志出现「ssh 隧道断开 (code=…)」，约 3s 后自动重连成功，手机恢复访问
-- [ ] **其余进程不团灭**：`dsh` / `gate` 仍存活，只是短暂不可用后自愈
-- [ ] （可选）快速失败提示：把 `config.json` 的 `ssh.keyPath` 改为不存在路径后 `npm start`，ssh 立即失败重试，第 3 次出现「连续快速断开，疑似认证/主机指纹/网络问题」提示（仍持续重连、不团灭）
+- [x] 隧道正常时，本机 `taskkill /F /IM ssh.exe`（或服务器 `systemctl restart sshd`）
+- [x] 日志出现「ssh 隧道断开 (code=…)」，约 3s 后自动重连成功，手机恢复访问
+- [x] **其余进程不团灭**：`dsh` / `gate` 仍存活，只是短暂不可用后自愈
+- [x] （可选）快速失败提示：把 `config.json` 的 `ssh.keyPath` 改为不存在路径后 `npm start`，ssh 立即失败重试，第 3 次出现「连续快速断开，疑似认证/主机指纹/网络问题」提示（仍持续重连、不团灭）
 
 ### 1.6 安全核对
 
-- [ ] 启动参数含 `StrictHostKeyChecking=yes`（不接受未知主机，防中间人）
-- [ ] 首次连未知主机时被拒（不会自动 `accept-new`）
-- [ ] `BatchMode=yes`：全程不弹密码交互框
-- [ ] 手机访问地址是 `https://`，登录 Cookie 带 `Secure`
+- [x] 启动参数含 `StrictHostKeyChecking=yes`（不接受未知主机，防中间人）
+- [x] 首次连未知主机时被拒（不会自动 `accept-new`）
+- [x] `BatchMode=yes`：全程不弹密码交互框
+- [x] 手机访问地址是 `https://`，登录 Cookie 带 `Secure`
 
 ---
 
@@ -63,8 +63,15 @@
 
 - [ ] `npm start -- --mode lan` → `config.json` 出现 `mode:"lan"`
 - [ ] 启动日志只有 `[dsh]` / `[gate]`，无 `[frpc]` / `[ssh]`
-- [ ] 日志打印 `http://<局域网IP>:3088/?t=…`；确认 IP 是本机真实局域网 IP（挂 VPN/虚拟网卡时确认没选错网卡）
+- [ ] 日志打印 `http://<局域网IP>:3088/?t=…`；确认 IP 是本机当前 Wi-Fi 网卡的地址（网关用默认路由探测选 IP，并在下方列出其余候选；挂了 VPN/虚拟网卡时对照 `ipconfig` 的 WLAN 项确认）
 - [ ] 手机连**同一 Wi-Fi**，浏览器打开该链接 → 进入 DSH，可正常对话/操作
+
+### 2.1a 打不开时的排查（按顺序）
+
+- [ ] 电脑本机浏览器开 `http://<局域网IP>:3088/`（**用局域网 IP，不是 127.0.0.1**）：返回 401 登录页 = 网络通、问题在手机侧；超时 = 防火墙或绑定问题
+- [ ] 手机 `ping`/浏览器访问电脑的局域网 IP 是否可达：校园网/企业 Wi-Fi 普遍开启 **AP 客户端隔离**，同网设备互不可达——属环境问题，非网关故障
+- [ ] 隔离疑云用热点排除：手机开热点、电脑连热点，重启 `npm start`（换网后 IP 会变），用新打印的 IP 访问
+- [ ] 仍不通：对照横幅候选 IP 列表逐个替换链接中的 IP 重试
 
 ### 2.2 防火墙
 
@@ -101,6 +108,7 @@
 
 ## 5. 已知未覆盖项
 
-- [ ] SSH 真实端到端：服务器 sshd + `authorized_keys` + known_hosts + 反代全链路（尚未实测）
-- [ ] LAN 真实端到端：不同网段手机连 `0.0.0.0` + 防火墙放行（尚未实测）
+- [x] ~~SSH 真实端到端~~ 已实测基本可用（稳定性略逊于 frp、流式输出略卡，属预期）；重连/断线细项仍可照 §1.5 过一遍
+- [ ] LAN 真实端到端：横幅 IP 选取 bug 已修复（默认路由探测），但**修复后尚未真机复测**——按 §2.1a 排查顺序验证（重点：热点环境下手机能否打开新打印的 IP）
 - [ ] 任务完成 Web Push（v2，已明确推迟）
+

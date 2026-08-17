@@ -16,6 +16,7 @@
 import http from 'node:http'
 import net from 'node:net'
 import os from 'node:os'
+import dgram from 'node:dgram'
 import fs from 'node:fs'
 import path from 'node:path'
 import crypto from 'node:crypto'
@@ -73,15 +74,35 @@ function esc(s) {
   return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
 }
 
-// 探测一个非回环 IPv4 用于打印局域网登录链接（仅展示，不参与绑定决策）
-function lanIp() {
-  const ifaces = os.networkInterfaces()
-  for (const name of Object.keys(ifaces)) {
-    for (const iface of ifaces[name] || []) {
-      if (!iface.internal && (iface.family === 'IPv4' || iface.family === 4)) return iface.address
+// 列出所有非回环 IPv4（仅展示，不参与绑定决策）
+function lanCandidates() {
+  const out = []
+  for (const list of Object.values(os.networkInterfaces())) {
+    for (const iface of list || []) {
+      if (!iface.internal && (iface.family === 'IPv4' || iface.family === 4)) out.push(iface.address)
     }
   }
-  return undefined
+  return out
+}
+
+// 探测局域网 IP：用 UDP connect 让操作系统选出「默认路由所在网卡」的地址（不真的发包）。
+// 直接取枚举第一个会踩中 VMware/Hyper-V 等虚拟网卡——那种地址手机永远够不到（踩过）。
+function lanIp() {
+  return new Promise((resolve) => {
+    const fallback = () => resolve(lanCandidates()[0])
+    try {
+      const s = dgram.createSocket('udp4')
+      s.on('error', fallback)
+      s.connect(80, '192.0.2.1', () => { // TEST-NET-1，仅触发路由选择
+        let addr
+        try { addr = s.address().address } catch { }
+        s.close()
+        resolve(addr || lanCandidates()[0])
+      })
+    } catch {
+      fallback()
+    }
+  })
 }
 
 // 转发到 dsh 的头白名单：抹掉一切能暴露「非本机访问」的痕迹
@@ -307,8 +328,11 @@ server.listen(PORT, BIND_HOST, () => {
   console.log(`[dsh-mobile-mini] listening on ${BIND_HOST}:${PORT} -> ${TARGET_HOST}:${TARGET_PORT}`)
   console.log(`[dsh-mobile-mini] 首次登录链接（token 见 config.json）:`)
   if (BIND_HOST === '0.0.0.0') {
-    const ip = lanIp()
-    console.log(`[dsh-mobile-mini]   http://${ip || '<本机局域网IP>'}:${PORT}/?t=${TOKEN}`)
+    lanIp().then((ip) => {
+      console.log(`[dsh-mobile-mini]   http://${ip || '<本机局域网IP>'}:${PORT}/?t=${TOKEN}`)
+      const alts = lanCandidates().filter((a) => a !== ip && !a.startsWith('169.254.'))
+      if (alts.length > 0) console.log(`[dsh-mobile-mini]   若打不开，把上面链接的 IP 换成候选之一再试: ${alts.join(' / ')}`)
+    })
   } else {
     console.log(`[dsh-mobile-mini]   https://${DOMAIN || '<你的域名>'}/?t=${TOKEN}`)
   }
