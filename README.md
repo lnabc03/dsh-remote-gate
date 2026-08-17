@@ -118,7 +118,7 @@ proxy_send_timeout 600s;
 ## 测试
 
 ```bash
-npm test   # 88 项：mock 上游 + 网关/面板/配置库/补丁锚点/看门狗等
+npm test   # 87 项：mock 上游 + 网关/面板/配置库/补丁锚点/看门狗等
 ```
 
 真机端到端清单见 [`TESTING.md`](TESTING.md)；踩坑记录与修复设计见 [`PITFALLS.md`](PITFALLS.md)；开发约束与文件职责见 [`AGENTS.md`](AGENTS.md)。
