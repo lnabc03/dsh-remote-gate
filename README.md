@@ -27,7 +27,7 @@
 
 - 网关默认只绑定 `127.0.0.1`（frp/ssh 模式，唯一入口是本地隧道，无公网暴露面）；`lan` 模式绑 `0.0.0.0` 供局域网直连（靠令牌一道闸，见安全模型）
 - 认证为「共享令牌 + 每设备 Cookie」，无任何 IP 相关逻辑——经 frp/ssh 后所有来源都是 127.0.0.1，基于 IP 的审批/限流在这种拓扑下必然失效（这也是重写 [dsh-mobile-pwa](https://github.com/zylzyqzz/dsh-mobile-pwa) 的原因）
-- 省流量：dsh 上游自身不压缩，网关在出站侧对可压响应（JS/CSS/JSON 等，>1KB、非流式）做 gzip，vendor.js 级别资产过隧道体积约降到 1/3；HTML 导航请求仍强制未压缩（注入所需）；网关每小时打印一行 `[gate] 流量: …` 汇总（下行计的是 post-gzip 的线上字节，即真实计费口径，并附 top3 路径热点榜方便定位大户），按出站计费的服务器可据此直接观察资费
+- 省流量：dsh 上游自身不压缩，网关在出站侧对可压响应（JS/CSS/JSON 等，>1KB、非流式）做 gzip，vendor.js 级别资产过隧道体积约降到 1/3；HTML 导航请求仍强制未压缩（注入所需）；网关每小时打印一行 `[gate] 流量: …` 汇总（下行计的是 post-gzip 的线上字节，即真实计费口径，并附 top3 路径热点榜 `路径 字节×次数`，用来区分「少量大响应」与「高频重拉」），按出站计费的服务器可据此直接观察资费。另：`patch-dsh.mjs` 的 B 组补丁根治了断帧修复整页重拉 `session.history` 的流量大头
 
 ## 快速开始
 
@@ -66,14 +66,12 @@ https://<随机串>.trycloudflare.com/?t=<token>     # cf 模式（每次启动�
 
 **lan / cf 模式无需服务器**。frp/ssh 模式：反代（Nginx/Caddy）把域名 HTTPS 流量转到隧道暴露的端口，并带上 `X-Forwarded-Proto: https` 头（用于给 Cookie 加 `Secure`；cf 模式由网关强制，不依赖此头）。
 
-反代必须调大读超时：dsh 的 `/api/commands/execute`（如 /compact）是**同步长任务**，响应在命令执行完才一次性返回，期间没有任何字节流动——Nginx 默认 `proxy_read_timeout 60s` 会直接 504。Nginx 在该 location 加：
+反代必须调大读超时：dsh 的 `/api/commands/execute`（如 /compact）是**同步长任务**，响应在命令执行完才一次性返回，期间没有任何字节流动——Nginx 默认 `proxy_read_timeout 60s` 会直接 504。**网关已内置缓解**：等上游响应头期间每 25s 向客户端发一次 `102 Processing` 中间响应（HTTP/1.1 合法 1xx，浏览器透明忽略，见 `DSH_GATE_HEARTBEAT_MS`），沿途反代的读超时会被不断重置，默认 60s 的 Nginx 也能扛住分钟级命令。但仍建议在 Nginx 该 location 加（双保险，且对 WebSocket 长连接同样必要；Caddy 默认无读超时，无需配置）：
 
 ```nginx
 proxy_read_timeout 600s;
 proxy_send_timeout 600s;
 ```
-
-（这对 WebSocket 长连接同样必要；Caddy 默认无读超时，无需配置。）
 
 **frp 模式**：frps 的 `frps.toml` 加 `transport.maxPoolCount = 20`（与 frpc 的 `poolCount` 对齐，否则刷 `work connection pool is full`）；反代转到的就是 frps 暴露的 `remotePort`（默认 3088）。
 
@@ -100,6 +98,7 @@ proxy_send_timeout 600s;
 | env | `DSH_GATE_PANEL_PORT` | `3089` | 控制面板端口（占用时自动递增） |
 | env | `DSH_GATE_PANEL_WINSIZE` | `1440x860` | 面板 `--app` 窗口初始尺寸（宽x高，仅 Chrome/Edge 应用窗口生效） |
 | env | `DSH_GATE_NO_OPEN` | — | 置 1 禁止启动时自动打开面板窗口 |
+| env | `DSH_GATE_HEARTBEAT_MS` | `25000` | 长响应保活：等上游响应头期间每该间隔下发一次 `102 Processing` 中间响应，重置隧道沿途反代（如 nginx 默认 60s `proxy_read_timeout`）的读超时，避免 `/compact` 这类分钟级同步命令被掐成 504；0 关闭 |
 | `config.json` | `token` / `port` / `targetPort` / `domain` | — | 同上，文件形式；`domain` 由面板写入 |
 | `config.json` | `mode` | `frp` | 访问模式：`frp` / `ssh` / `lan` / `cf`（缺省 frp，向后兼容；cf 无额外字段） |
 | `config.json` | `frp.serverAddr` / `frp.serverPort` / `frp.authToken` | — | frp 模式专用（唯一数据源；`frp/frpc.toml` 为生成产物） |
@@ -120,7 +119,7 @@ proxy_send_timeout 600s;
 ## 测试
 
 ```bash
-npm test   # 78 项：mock 上游 + 网关子进程冒烟、配置库、面板服务（令牌登录/CSRF/SSE）、日志过滤、补丁锚点、waitExit 热重启原语
+npm test   # 81 项：mock 上游 + 网关子进程冒烟（含 102 保活心跳）、配置库、面板服务（令牌登录/CSRF/SSE）、日志过滤、补丁锚点、waitExit 热重启原语
 ```
 
 > 真机端到端（SSH 反向隧道 / LAN 局域网直连）的逐步清单见 [`TESTING.md`](TESTING.md)。
@@ -134,7 +133,7 @@ npm test   # 78 项：mock 上游 + 网关子进程冒烟、配置库、面板�
 | `admin.mjs` + `admin/` | 本地控制面板：HTTP 服务（127.0.0.1 + 令牌 + 防 CSRF）与前端页面（vanilla JS；QR 库、Inter/JetBrains Mono 可变字体、鲸鱼图标均 vendored 于 `admin/vendor/`） |
 | `config-lib.mjs` | 配置库：config.json 读写（原子写）、面板表单校验、frpc.toml 迁移与生成、隧道二进制前置检查 |
 | `setup.mjs` | 纯函数库：字段校验、frpc.toml 渲染/解析、ssh 参数构造与连通性自检（交互式配置已由面板取代） |
-| `patch-dsh.mjs` | 幂等补丁 DSH client-runtime（修复提问弹窗被重连刷没） |
+| `patch-dsh.mjs` | 幂等补丁 DSH client-runtime：A. 修复提问弹窗被重连刷没；B. 断帧修复/重连改为增量合并最小尾页（1→5→50 条消息逐级放大），替代整页重拉——移动端隧道流量大头的根治（实测一页 541KB gz → 常见缺口 57KB gz） |
 | `pwa/` | manifest.json、最小 service worker、图标（dsh 官方鲸鱼 logo） |
 | `frp/frpc.toml.example` | frp 客户端配置模板 |
 | `cf/` | cloudflared 二进制放置目录（下载指引见 `cf/README.md`） |

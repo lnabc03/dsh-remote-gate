@@ -140,12 +140,20 @@ function cleanHeaders(req) {
 
 // ---- 流量统计：验证压缩收益；仅累计打印，不影响转发 -------------------------------
 // 口径：下行数「写回浏览器」一侧的字节（post-gzip），即真实过隧道/计费的字节；
-// 上行数请求体原始字节（本来就极小）。paths 记录下行按路径分布，供每小时热点榜。
+// 上行数请求体原始字节（本来就极小）。paths 每项记 {b: 字节, n: 请求数}——
+// 次数用来区分「少量大响应」与「高频重拉」，排查热点靠它。
 const meter = { up: 0, down: 0, upTotal: 0, downTotal: 0, paths: new Map() }
 const meterUp = (n) => { meter.up += n; meter.upTotal += n }
+function meterReq(pathKey) {
+  const e = meter.paths.get(pathKey) || { b: 0, n: 0 }
+  e.n++
+  meter.paths.set(pathKey, e)
+}
 function meterDown(pathKey, n) {
   meter.down += n; meter.downTotal += n
-  meter.paths.set(pathKey, (meter.paths.get(pathKey) || 0) + n)
+  const e = meter.paths.get(pathKey) || { b: 0, n: 0 }
+  e.b += n
+  meter.paths.set(pathKey, e)
 }
 function fmtBytes(n) {
   if (n >= 1 << 30) return (n / (1 << 30)).toFixed(2) + ' GB'
@@ -155,8 +163,8 @@ function fmtBytes(n) {
 }
 setInterval(() => {
   if (meter.up + meter.down === 0) return // 静默时段不刷日志
-  const top = [...meter.paths.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3)
-    .map(([p, n]) => (p.length > 60 ? '…' + p.slice(-59) : p) + ' ' + fmtBytes(n)).join(', ')
+  const top = [...meter.paths.entries()].sort((a, b) => b[1].b - a[1].b).slice(0, 3)
+    .map(([p, e]) => (p.length > 60 ? '…' + p.slice(-59) : p) + ' ' + fmtBytes(e.b) + '×' + e.n).join(', ')
   console.log(`流量: 最近 1h ↓${fmtBytes(meter.down)} ↑${fmtBytes(meter.up)}；累计 ↓${fmtBytes(meter.downTotal)} ↑${fmtBytes(meter.upTotal)}` + (top ? `；热点: ${top}` : ''))
   meter.up = 0; meter.down = 0; meter.paths.clear()
 }, 3600_000).unref()
@@ -264,11 +272,18 @@ function injectHtml(html) {
 const GZIP_TYPE = /^(text\/|application\/(json|javascript|manifest\+json|xml|wasm)|image\/svg\+xml)/
 const GZIP_MIN = 1024 // 太小的响应压缩反而膨胀
 
+// 长响应保活：上游迟迟不给响应头时（/compact 这类同步长命令轻松超过 60s），隧道链路上的
+// 中间反代（nginx 默认 proxy_read_timeout 60s）会先把连接掐成 504。在等响应头阶段周期性
+// 下发 102 Processing 中间响应（HTTP/1.1 合法 1xx，浏览器 fetch 透明忽略），重置沿途读超时。
+// 上游响应头一到即停止：此后的本地缓冲/透传都是毫秒级，不再需要。DSH_GATE_HEARTBEAT_MS 可调，0 关闭。
+const HEARTBEAT_MS = Number(process.env.DSH_GATE_HEARTBEAT_MS ?? 25_000)
+
 function forward(req, res) {
   const clientGzip = /\bgzip\b/.test(String(req.headers['accept-encoding'] || ''))
   // 下行计在写回浏览器这一侧（post-gzip 才是真实过隧道字节）；包装 write/end 以覆盖
   // pipe 透传、缓冲改写、超上限回退三种路径
   const pathKey = String(req.url || '').split('?')[0]
+  meterReq(pathKey)
   const resWrite = res.write.bind(res)
   const resEnd = res.end.bind(res)
   const countChunk = (chunk) => {
@@ -277,11 +292,20 @@ function forward(req, res) {
   }
   res.write = (chunk, ...rest) => { countChunk(chunk); return resWrite(chunk, ...rest) }
   res.end = (chunk, ...rest) => { countChunk(chunk); return resEnd(chunk, ...rest) }
+  let heartbeat = null
+  if (HEARTBEAT_MS > 0 && req.httpVersion !== '1.0') {
+    heartbeat = setInterval(() => {
+      try { if (!res.headersSent && !res.writableEnded) res.writeProcessing() } catch { }
+    }, HEARTBEAT_MS)
+    heartbeat.unref?.()
+  }
+  const stopHeartbeat = () => { if (heartbeat !== null) { clearInterval(heartbeat); heartbeat = null } }
   const upstream = http.request({
     host: TARGET_HOST, port: TARGET_PORT,
     method: req.method, path: req.url,
     headers: cleanHeaders(req),
   }, (upRes) => {
+    stopHeartbeat()
     const h = { ...upRes.headers }
     const ct = String(h['content-type'] || '')
     const ce = String(h['content-encoding'] || '')
@@ -329,12 +353,13 @@ function forward(req, res) {
     upRes.on('error', () => { try { res.end() } catch { } })
   })
   upstream.on('error', () => {
+    stopHeartbeat()
     try {
       if (!res.headersSent) res.writeHead(502, { 'Content-Type': 'text/plain; charset=utf-8' })
       res.end('Bad Gateway: DSH Web UI 不可达，请确认 dsh web 已启动')
     } catch { }
   })
-  res.on('close', () => { try { upstream.destroy() } catch { } })
+  res.on('close', () => { stopHeartbeat(); try { upstream.destroy() } catch { } })
   req.on('data', (c) => meterUp(c.length))
   req.pipe(upstream)
 }
@@ -387,6 +412,7 @@ server.on('upgrade', (req, socket, head) => {
     try {
       upstream.write(raw)
       if (head && head.length) upstream.write(head)
+      meterReq(String(req.url || '').split('?')[0])
       socket.on('data', (c) => meterUp(c.length)) // WS 帧计数（pipe 之外并行监听，不消费）
       upstream.on('data', (c) => meterDown(String(req.url || '').split('?')[0], c.length))
       socket.pipe(upstream)

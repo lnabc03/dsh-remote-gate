@@ -27,12 +27,12 @@
 
 | 路径 | 职责 | 改动注意 |
 | --- | --- | --- |
-| `gateway.mjs` | 令牌认证 + 反代 + WS 隧道 + manifest 注入 + 流量统计（每小时一行 ↓↑ 字节 + 下行 top3 路径热点榜，静默时段不刷） | 改完必跑 `npm test`；下行口径 = 写回浏览器侧字节（post-gzip，即过隧道计费口径），勿改回上游侧计数；保持单文件自包含 |
+| `gateway.mjs` | 令牌认证 + 反代 + WS 隧道 + manifest 注入 + 流量统计（每小时一行 ↓↑ 字节 + 下行 top3 路径热点榜 `路径 字节×次数`，静默时段不刷）+ 长响应保活心跳 | 改完必跑 `npm test`；下行口径 = 写回浏览器侧字节（post-gzip，即过隧道计费口径），勿改回上游侧计数；**102 心跳只在「等上游响应头」阶段发送**（`DSH_GATE_HEARTBEAT_MS`，默认 25s），上游响应头一到必停——`res.headersSent` 后再 writeProcessing 会毁流，清定时器的三个位置（upRes 回调/error/close）勿删；保持单文件自包含 |
 | `start.mjs` | 进程编排 + 面板宿主：拉起面板/dsh/网关/隧道，单窗口日志加前缀 | dsh 崩溃自动重启（5 次×3s）；网关/frpc/cloudflared **意外**退出团灭，ssh 退出 3s 重拨（约束 7）；面板保存触发的重启靠 gen 代际区分，别绕过 stopGate/stopTunnel 直接 kill；**热重启必须 await `waitExit` 等旧进程退出释放端口再拉新**——killTree 是异步的（Windows 走 taskkill），立即 spawn 新网关会 EADDRINUSE 秒退，被 exit 回调误判为意外崩溃 → 团灭（踩过）；cf 临时域名由 startCfProc 抓日志（`extractCfUrl`）→ 拼令牌打印 + 推面板；dsh 直接 spawn node bin.js（约束 6），杀派生树用 `taskkill /T`；`--no-ui` 关闭面板 |
 | `admin.mjs` + `admin/` | 本地控制面板：HTTP 服务（认证/CSRF/SSE 日志流）+ 前端（vanilla JS） | 约束 10；静态文件白名单 `STATIC_FILES` 闭集，加新文件要同步登记；前端 CSP `default-src 'self'`，别引入内联脚本/外部 CDN；令牌轮换后 POST 响应须 Set-Cookie 换新（否则面板把自己锁外面） |
 | `config-lib.mjs` | config.json 读写（`saveConfigAtomic`）、面板表单校验（`validatePanelConfig`）、frpc.toml 迁移与生成、`isConfigured`/`preflightForMode` | 约束 11；表单空串语义 = 「未改动」回退 existing（`pick` 助手），别用 `??` 挡空串——踩过 |
 | `setup.mjs` | 纯函数库：字段校验、frpc.toml 渲染/解析、ssh 参数构造与连通性自检 | 交互式配置已删除（面板取代），勿再加 readline 提问；改校验/渲染/ssh 参数必跑 `npm test` |
-| `patch-dsh.mjs` | 幂等补丁 DSH client-runtime（修复提问弹窗被重连刷没） | 锚点严格 LF + Tab；改锚点先跑 `npm test` |
+| `patch-dsh.mjs` | 幂等补丁 DSH client-runtime：A. 修复提问弹窗被重连刷没；B. repairGap/doOpen 断帧修复从「整页重拉 + 整窗替换」改为 `repairTailMerge` 增量合并最小尾页（1→5→50 条消息逐级放大，50 仍够不到旧窗尾才退回整窗替换） | 锚点严格 LF + Tab；逐锚点幂等（marker 命中即跳过，兼容只打过 A 组的旧文件），别把幂等判断改回全局早退；改锚点先跑 `npm test`；B 组依赖「窗口内事件不可变、appendLive 按 seq 去重」的运行时语义，若 dsh 升级改变这两点需重新评估 |
 | `pwa/sw.js` | 最小 SW，只为满足 Chrome 可安装性；**不做缓存**（下拉误刷新类 bug 的教训），v2 推送的 push 事件也加在这里 | |
 | `pwa/icons/` | dsh 官方鲸鱼 logo（白底黑鲸，maskable 版缩到 68% 保安全区） | 源文件是 dsh 的 `/favicon.svg` |
 | `frp/frpc.toml.example` | 隧道配置模板 | 真实 `frpc.toml` 含 token，已 gitignore；且它只是生成产物（约束 11） |

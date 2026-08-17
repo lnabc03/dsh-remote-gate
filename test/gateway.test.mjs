@@ -2,6 +2,7 @@
 import { test, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import http from 'node:http'
+import net from 'node:net'
 import fs from 'node:fs'
 import os from 'node:os'
 import zlib from 'node:zlib'
@@ -47,6 +48,14 @@ before(async () => {
       res.end(SSE_BODY)
       return
     }
+    if (req.url === '/api/slow') {
+      // 模拟 compact 类同步长命令：响应头 600ms 后才给出
+      setTimeout(() => {
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end('{"slow":true}')
+      }, 600)
+      return
+    }
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
     res.end(HTML_PAGE)
   })
@@ -60,6 +69,8 @@ before(async () => {
       DSH_GATE_TARGET_PORT: String(UP_PORT),
       // 固定绑 127.0.0.1：否则网关会读仓库里真实 config.json 的 mode（用户当前可能是 lan），测试不再密封
       DSH_GATE_BIND: '127.0.0.1',
+      // 加速心跳便于测试 102 Processing（生产默认 25s）
+      DSH_GATE_HEARTBEAT_MS: '80',
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   })
@@ -189,6 +200,38 @@ test('非 HTML 响应原样透传', async () => {
   const res = await fetch(base() + '/api/data', { headers: { Cookie: cookie } })
   assert.equal(res.status, 200)
   assert.equal(await res.text(), '{"ok":true}')
+})
+
+// 裸 TCP 读线上字节：undici/http.get 会吞掉 1xx 中间响应，测心跳必须看原始流
+test('长响应保活：等上游响应头期间周期性下发 102 Processing，最终响应完好', async () => {
+  const cookie = await loginCookie()
+  const reply = await new Promise((resolve, reject) => {
+    const sock = net.connect(GATE_PORT, '127.0.0.1', () => {
+      sock.write('POST /api/slow HTTP/1.1\r\n' +
+        'Host: 127.0.0.1\r\n' +
+        'Cookie: ' + cookie + '\r\n' +
+        'Content-Type: application/json\r\n' +
+        'Content-Length: 2\r\n' +
+        'Connection: close\r\n\r\n{}')
+    })
+    let buf = ''
+    sock.on('data', (d) => { buf += d.toString('latin1') })
+    sock.on('end', () => resolve(buf))
+    sock.on('error', reject)
+    setTimeout(() => reject(new Error('slow request timeout')), 8000)
+  })
+  // 600ms 延迟 / 80ms 心跳 → 应出现多个 102，且都在最终 200 之前
+  const interim = reply.match(/HTTP\/1\.1 102 Processing/g) || []
+  assert.ok(interim.length >= 2, `应有多个 102 中间响应，实际 ${interim.length} 个`)
+  assert.ok(reply.indexOf('102 Processing') < reply.lastIndexOf('200 OK'), '102 必须在最终响应之前')
+  assert.match(reply, /\{"slow":true\}/)
+})
+
+test('快响应不触发 102 心跳（普通 API 请求无中间响应）', async () => {
+  const cookie = await loginCookie()
+  const res = await rawGet('/api/data', { Cookie: cookie })
+  assert.equal(res.status, 200)
+  assert.equal(res.raw.toString(), '{"ok":true}')
 })
 
 test('/pwa/* 豁免认证（iOS 安装图标不带 Cookie），其余路径仍拦 401', async () => {
