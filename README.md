@@ -59,6 +59,15 @@ http://<本机局域网IP>:3088/?t=<token>   # lan 模式
 
 **lan 模式无需服务器**。frp/ssh 模式：反代（Nginx/Caddy）把域名 HTTPS 流量转到隧道暴露的端口，并带上 `X-Forwarded-Proto: https` 头（用于给 Cookie 加 `Secure`）。
 
+反代必须调大读超时：dsh 的 `/api/commands/execute`（如 /compact）是**同步长任务**，响应在命令执行完才一次性返回，期间没有任何字节流动——Nginx 默认 `proxy_read_timeout 60s` 会直接 504。Nginx 在该 location 加：
+
+```nginx
+proxy_read_timeout 600s;
+proxy_send_timeout 600s;
+```
+
+（这对 WebSocket 长连接同样必要；Caddy 默认无读超时，无需配置。）
+
 **frp 模式**：frps 的 `frps.toml` 加 `transport.maxPoolCount = 20`（与 frpc 的 `poolCount` 对齐，否则刷 `work connection pool is full`）；反代转到的就是 frps 暴露的 `remotePort`（默认 3088）。
 
 **ssh 模式**：服务器需已运行 sshd、账号可用、`sshd_config` 里 `AllowTcpForwarding yes`（反向隧道默认只绑 127.0.0.1，无需 `GatewayPorts`）；本机私钥对应的公钥要加入该账号的 `~/.ssh/authorized_keys`；首次连接前先在命令行手动 `ssh <用户>@<服务器>` 一次录入主机指纹。反代转到的就是 ssh 反向隧道绑定的 `127.0.0.1:3088`。
