@@ -2,7 +2,10 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
-import { shouldIgnoreLine, FRPC_IGNORE, CF_IGNORE, CF_IGNORE_RE, extractCfUrl, waitExit, panelWindowSize } from '../start.mjs'
+import fs from 'node:fs'
+import path from 'node:path'
+import os from 'node:os'
+import { shouldIgnoreLine, FRPC_IGNORE, CF_IGNORE, CF_IGNORE_RE, extractCfUrl, waitExit, panelWindowSize, panelProfileDir, clearSavedWindowPlacement } from '../start.mjs'
 
 test('shouldIgnoreLine：frpc 的 pool-full 告警被过滤', () => {
   const noisy = '2026-08-17 00:38:19 [E] [client/control.go:153] StartWorkConn contains error: work connection pool is full, discarding'
@@ -125,4 +128,36 @@ test('panelWindowSize：默认 1440×860，环境变量可覆盖，非法值回�
   assert.deepEqual(panelWindowSize({ DSH_GATE_PANEL_WINSIZE: '1366,768' }), { w: 1366, h: 768 })
   assert.deepEqual(panelWindowSize({ DSH_GATE_PANEL_WINSIZE: 'abc' }), { w: 1440, h: 860 })
   assert.deepEqual(panelWindowSize({ DSH_GATE_PANEL_WINSIZE: '99x99' }), { w: 1440, h: 860 })
+})
+
+test('panelProfileDir：指向 LOCALAPPDATA 下的隔离目录', () => {
+  const dir = panelProfileDir()
+  assert.ok(dir.includes('dsh-remote-gate'))
+  assert.ok(dir.includes('panel-profile'))
+})
+
+test('clearSavedWindowPlacement：清除已保存的窗口位置', () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-test-panel-'))
+  const defaultDir = path.join(tmpDir, 'Default')
+  fs.mkdirSync(defaultDir, { recursive: true })
+  const prefs = {
+    browser: {
+      window_placement: { left: 0, top: 0, right: 1024, bottom: 768 },
+      window_placement_popup: { left: 100, top: 100, right: 500, bottom: 400 },
+      window_placement_app: { left: 0, top: 0, right: 800, bottom: 600 }
+    }
+  }
+  fs.writeFileSync(path.join(defaultDir, 'Preferences'), JSON.stringify(prefs), 'utf8')
+  clearSavedWindowPlacement(tmpDir)
+  const after = JSON.parse(fs.readFileSync(path.join(defaultDir, 'Preferences'), 'utf8'))
+  assert.strictEqual(after.browser.window_placement, undefined)
+  assert.strictEqual(after.browser.window_placement_popup, undefined)
+  assert.strictEqual(after.browser.window_placement_app, undefined)
+  fs.rmSync(tmpDir, { recursive: true, force: true })
+})
+
+test('clearSavedWindowPlacement：无 Preferences 文件时不抛错', () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-test-panel-'))
+  clearSavedWindowPlacement(tmpDir)
+  fs.rmSync(tmpDir, { recursive: true, force: true })
 })

@@ -519,15 +519,47 @@ export function panelWindowSize(env = process.env) {
   return { w: m ? +m[1] : 1440, h: m ? +m[2] : 860 }
 }
 
+// 面板应用窗口专用 Edge 配置目录（隔离主配置，避免 --window-size 被已保存的窗口位置覆盖）
+export function panelProfileDir() {
+  const base = process.env.LOCALAPPDATA || os.tmpdir()
+  return path.join(base, 'dsh-remote-gate', 'panel-profile')
+}
+
+// 清除已保存的窗口位置，确保下次 --window-size 生效
+export function clearSavedWindowPlacement(profileDir) {
+  try {
+    const prefPath = path.join(profileDir, 'Default', 'Preferences')
+    if (!fs.existsSync(prefPath)) return
+    const raw = fs.readFileSync(prefPath, 'utf8')
+    const prefs = JSON.parse(raw)
+    if (prefs.browser) {
+      delete prefs.browser.window_placement
+      delete prefs.browser.window_placement_popup
+      if (prefs.browser.window_placement_app) delete prefs.browser.window_placement_app
+    }
+    fs.writeFileSync(prefPath, JSON.stringify(prefs), 'utf8')
+  } catch {
+    // 忽略：文件损坏或锁定时跳过，下次启动会重建
+  }
+}
+
 function openInBrowser(url) {
   if (process.env.DSH_GATE_NO_OPEN) return
   try {
     if (process.platform === 'win32') {
       for (const bin of appBrowserCandidates()) {
         if (fs.existsSync(bin)) {
-          // --app=：无地址栏/标签页的独立窗口，接近原生应用体验；--window-size 固定初始尺寸
           const { w, h } = panelWindowSize()
-          spawn(bin, ['--app=' + url, `--window-size=${w},${h}`], { detached: true, stdio: 'ignore', windowsHide: true }).unref()
+          const profileDir = panelProfileDir()
+          fs.mkdirSync(profileDir, { recursive: true })
+          clearSavedWindowPlacement(profileDir)
+          spawn(bin, [
+            `--user-data-dir=${profileDir}`,
+            '--no-first-run',
+            '--no-default-browser-check',
+            '--app=' + url,
+            `--window-size=${w},${h}`
+          ], { detached: true, stdio: 'ignore', windowsHide: true }).unref()
           say('start', `已用应用窗口打开控制面板（${path.basename(bin)}，${w}×${h}）`)
           return
         }
