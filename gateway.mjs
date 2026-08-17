@@ -337,14 +337,13 @@ server.on('upgrade', (req, socket, head) => {
 
 server.listen(PORT, BIND_HOST, () => {
   console.log(`listening on ${BIND_HOST}:${PORT} -> ${TARGET_HOST}:${TARGET_PORT}`)
-  console.log(`首次登录链接（token 见 config.json）:`)
   if (BIND_HOST === '0.0.0.0') {
     lanIp().then((ip) => {
-      console.log(`  http://${ip || '<本机局域网IP>'}:${PORT}/?t=${TOKEN}`)
+      console.log(`登录链接: http://${ip || '<本机局域网IP>'}:${PORT}/?t=${TOKEN}`)
       const alts = lanCandidates().filter((a) => a !== ip && !a.startsWith('169.254.'))
-      if (alts.length > 0) console.log(`  若打不开，把上面链接的 IP 换成候选之一再试: ${alts.join(' / ')}`)
+      if (alts.length > 0) console.log(`备用 IP: ${alts.join(' / ')}（打不开时替换链接里的 IP 再试）`)
     })
   } else {
-    console.log(`  https://${DOMAIN || '<你的域名>'}/?t=${TOKEN}`)
+    console.log(`登录链接: https://${DOMAIN || '<你的域名>'}/?t=${TOKEN}`)
   }
 })

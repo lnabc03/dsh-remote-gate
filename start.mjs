@@ -29,6 +29,11 @@ function shouldIgnoreLine(tag, line) {
 const procs = []
 let shuttingDown = false
 
+// 日志标签补齐到 8 列（'[setup] ' / '[start] ' / '[gate]  ' / '[dsh]   '），消息列对齐
+const padTag = (t) => ('[' + t + ']').padEnd(8)
+const say = (t, msg) => console.log(padTag(t) + msg)
+const sayErr = (t, msg) => console.error(padTag(t) + msg)
+
 function killTree(p) {
   // Windows: p.kill() 只杀直接子进程，npx -> node 的派生树需要 taskkill /T
   if (process.platform === 'win32' && p.pid) {
@@ -53,9 +58,9 @@ function attach(p, tag) {
       buf += d
       const lines = buf.split('\n')
       buf = lines.pop()
-      for (const line of lines) if (!shouldIgnoreLine(tag, line)) out.write(`[${tag}] ${line}\n`)
+      for (const line of lines) if (!shouldIgnoreLine(tag, line)) out.write(`${padTag(tag)}${line.replace(/\r$/, '')}\n`)
     })
-    stream.on('end', () => { if (buf && !shouldIgnoreLine(tag, buf)) out.write(`[${tag}] ${buf}\n`) })
+    stream.on('end', () => { if (buf && !shouldIgnoreLine(tag, buf)) out.write(`${padTag(tag)}${buf.replace(/\r$/, '')}\n`) })
   }
   procs.push(p)
   return p
@@ -95,21 +100,21 @@ function resolveDshBin() {
 function startDsh(retriesLeft = 5) {
   const dshBin = resolveDshBin()
   if (dshBin === null) {
-    console.error('[start] 未找到全局安装的 @deepseek-ai/dsh，请先执行 npm install -g @deepseek-ai/dsh')
+    sayErr('start', '未找到全局安装的 @deepseek-ai/dsh，请先执行 npm install -g @deepseek-ai/dsh')
     return
   }
   const p = spawn(process.execPath, [dshBin, 'web'], {
     stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
   })
   attach(p, 'dsh')
-  p.on('error', (err) => console.error(`[start] dsh 启动失败: ${err.message}`))
+  p.on('error', (err) => sayErr('start', `dsh 启动失败: ${err.message}`))
   p.on('exit', (code, signal) => {
     if (shuttingDown) return
     if (retriesLeft > 0) {
-      console.log(`[start] dsh web 退出 (code=${code} signal=${signal})，3s 后重启（剩余重试 ${retriesLeft}）`)
+      say('start', `dsh web 退出 (code=${code} signal=${signal})，3s 后重启（剩余重试 ${retriesLeft}）`)
       setTimeout(() => { if (!shuttingDown) startDsh(retriesLeft - 1) }, 3000).unref()
     } else {
-      console.error('[start] dsh web 反复退出，放弃重启；网关与隧道保持运行（手机端将 502）')
+      sayErr('start', 'dsh web 反复退出，放弃重启；网关与隧道保持运行（手机端将 502）')
     }
   })
 }
@@ -117,10 +122,10 @@ function startDsh(retriesLeft = 5) {
 function startVital({ tag, cmd, args }) {
   const p = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
   attach(p, tag)
-  p.on('error', (err) => { console.error(`[start] ${tag} 启动失败: ${err.message}`); shutdown(1) })
+  p.on('error', (err) => { sayErr('start', `${tag} 启动失败: ${err.message}`); shutdown(1) })
   p.on('exit', (code, signal) => {
     if (shuttingDown) return
-    console.log(`[start] ${tag} 退出 (code=${code} signal=${signal})，一并关闭其余进程`)
+    say('start', `${tag} 退出 (code=${code} signal=${signal})，一并关闭其余进程`)
     shutdown(code ?? 0)
   })
 }
@@ -129,7 +134,7 @@ function startVital({ tag, cmd, args }) {
 const SSH_RECONNECT_MS = 3000
 function startSsh(sshCfg, retryCount = 0) {
   if (!sshCfg || !sshCfg.host || !sshCfg.user) {
-    console.error('[start] SSH 配置不完整，无法启动隧道；请运行 npm start -- --setup 重新配置')
+    sayErr('start', 'SSH 配置不完整，无法启动隧道；请运行 npm start -- --setup 重新配置')
     shutdown(1)
     return
   }
@@ -145,7 +150,7 @@ function startSsh(sshCfg, retryCount = 0) {
   const p = spawn('ssh', args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
   attach(p, 'ssh')
   p.on('error', (err) => {
-    console.error(`[start] ssh 启动失败: ${err.message}（请确认系统已安装 OpenSSH 客户端）`)
+    sayErr('start', `ssh 启动失败: ${err.message}（请确认系统已安装 OpenSSH 客户端）`)
     shutdown(1)
   })
   p.on('exit', (code, signal) => {
@@ -153,10 +158,9 @@ function startSsh(sshCfg, retryCount = 0) {
     const fast = Date.now() - startedAt < 5000
     const next = fast ? retryCount + 1 : 0
     if (next === 3) {
-      console.log('[start] ssh 连续快速断开，疑似认证/主机指纹/网络问题；仍会继续重连')
-      console.log('[start]   私钥/用户名见 config.json 的 ssh 字段；首次连接需先手动 ssh 一次录入主机指纹')
+      say('start', 'ssh 连续快速断开，疑似认证/主机指纹/网络问题（仍会继续重连；私钥见 config.json ssh 字段，首次需先手动 ssh 一次录入指纹）')
     }
-    console.log(`[start] ssh 隧道断开 (code=${code} signal=${signal})，${SSH_RECONNECT_MS / 1000}s 后重连`)
+    say('start', `ssh 隧道断开 (code=${code} signal=${signal})，${SSH_RECONNECT_MS / 1000}s 后重连`)
     setTimeout(() => { if (!shuttingDown) startSsh(sshCfg, next) }, SSH_RECONNECT_MS).unref()
   })
 }
@@ -167,31 +171,29 @@ async function main() {
   if (setup.action === 'exit') process.exit(setup.code)
   if (setup.action === 'configured') console.log('')
 
-  // 2) 补丁 DSH client-runtime（修复「提问弹窗被重连刷没」）；幂等，失败不阻断启动
+  // 2) 补丁 DSH client-runtime（修复「提问弹窗被重连刷没」）；幂等，失败不阻断启动；已存在则静默
   const dshWasRunning = await probeDsh()
   const patch = patchDsh()
   if (patch.status === 'patched') {
-    console.log(`[start] 已补丁 DSH client-runtime：${patch.path}`)
-    if (dshWasRunning) console.log('[start] 注意：dsh web 已在运行，补丁需重启 dsh 后生效')
-  } else if (patch.status === 'already') {
-    console.log(`[start] DSH client-runtime 补丁已存在：${patch.path}`)
+    say('start', '已补丁 dsh client-runtime（修复提问弹窗被重连刷没）')
+    if (dshWasRunning) say('start', '注意：dsh web 已在运行，补丁需重启 dsh 后生效')
   } else if (patch.status === 'missing') {
-    console.log('[start] 未找到 DSH client-runtime（可能尚未安装），跳过补丁；提问弹窗问题可能仍存在')
-  } else {
-    console.log(`[start] DSH 补丁失败（${patch.message}），跳过；提问弹窗问题可能仍存在`)
+    say('start', '未找到 dsh client-runtime（可能尚未安装），跳过补丁')
+  } else if (patch.status !== 'already') {
+    sayErr('start', `dsh 补丁失败（${patch.message}），跳过`)
   }
 
   // 3) 启动 dsh web（已在运行则跳过）
   if (dshWasRunning) {
-    console.log('[start] 检测到 dsh web 已在 3080 运行，跳过启动')
+    say('start', 'dsh web 已在 3080 运行，跳过启动')
   } else {
-    console.log('[start] 启动 dsh web...')
+    say('start', '启动 dsh web...')
     startDsh()
     // 等 dsh web 就绪（最多 30s），避免网关刚启动时 502
     for (let i = 0; i < 20; i++) {
       await new Promise(r => setTimeout(r, 1500))
       if (await probeDsh()) break
-      if (i === 19) console.log('[start] 等待 dsh web 超时，仍继续启动网关')
+      if (i === 19) say('start', '等待 dsh web 超时，仍继续启动网关')
     }
   }
   startVital({ tag: 'gate', cmd: process.execPath, args: [path.join(__dirname, 'gateway.mjs')] })
@@ -200,13 +202,12 @@ async function main() {
   let cfg = {}
   try { cfg = readConfigJson(fs.readFileSync(path.join(__dirname, 'config.json'), 'utf8')) } catch { /* 无配置则默认 frp */ }
   if (cfg.mode === 'ssh') {
-    console.log('[start] 隧道模式：ssh 反向隧道')
+    say('start', '模式: ssh（反向隧道，断线自动重拨）')
     startSsh(cfg.ssh || {})
   } else if (cfg.mode === 'lan') {
-    console.log('[start] 模式：局域网直连（网关绑 0.0.0.0，无隧道）')
-    console.log('[start]   首次绑 0.0.0.0 时 Windows 可能弹防火墙提示，请点「允许」')
+    say('start', '模式: lan（局域网直连，无隧道；首次若弹防火墙提示请点「允许」）')
   } else {
-    console.log('[start] 隧道模式：frp')
+    say('start', '模式: frp（隧道）')
     startVital({ tag: 'frpc', cmd: path.join(__dirname, 'frp', frpcBinaryName()), args: ['-c', path.join(__dirname, 'frp', 'frpc.toml')] })
   }
 }

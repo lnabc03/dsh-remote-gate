@@ -13,6 +13,11 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const FRPC_PATH = path.join(__dirname, 'frp', 'frpc.toml')
 const CONFIG_PATH = path.join(__dirname, 'config.json')
 
+// 日志标签与 start.mjs 对齐：'[setup] ' 补齐 8 列，消息列对齐
+const SETUP_TAG = '[setup] '
+const say = (msg) => console.log(SETUP_TAG + msg)
+const sayErr = (msg) => console.error(SETUP_TAG + msg)
+
 // ---- CLI 标志 -----------------------------------------------------------------
 export function parseArgs(argv) {
   const flags = {
@@ -312,9 +317,8 @@ function promptField(rl, { label, defaultValue, required, validate, normalize })
 }
 
 function printFrpcMissingHint(name) {
-  console.error(`[setup] 未找到 frp/${name}。请从 ${FRP_RELEASES} 下载对应平台 release，`)
-  console.error(`[setup] 把 ${name} 放进 frp/ 目录后重新运行 npm start。`)
-  console.error('[setup] 配置已写入，下次运行不会再提问。')
+  sayErr(`未找到 frp/${name}；请从 ${FRP_RELEASES} 下载对应平台 release，把 ${name} 放进 frp/ 目录后重新运行 npm start`)
+  sayErr('配置已写入，下次运行不会再提问。')
 }
 
 // ---- 主入口（start.mjs 调用）------------------------------------------------------
@@ -327,7 +331,7 @@ async function collectFields(specs, nonTty, rl) {
       let v = spec.normalize ? spec.normalize(spec.flag) : String(spec.flag).trim()
       const err = spec.validate ? spec.validate(v) : null
       if (err) {
-        console.error(`[setup] 标志 ${spec.flagName} 无效：${err}`)
+        sayErr(`标志 ${spec.flagName} 无效：${err}`)
         return { error: 'invalid-flag' }
       }
       values[spec.key] = spec.coerce ? spec.coerce(v) : v
@@ -337,7 +341,7 @@ async function collectFields(specs, nonTty, rl) {
   }
   if (missing.length > 0) {
     if (nonTty) {
-      console.error('[setup] 未提供完整配置且标准输入不是终端；请用 --mode 及对应标志补全，或交互式运行 npm start。')
+      sayErr('未提供完整配置且标准输入不是终端；请用 --mode 及对应标志补全，或交互式运行 npm start。')
       return { error: 'non-tty' }
     }
     for (const spec of missing) {
@@ -366,7 +370,7 @@ export async function ensureConfigured(argv = [], io = {}) {
   let mode = flags.mode !== undefined ? normalizeMode(flags.mode) : (existingCfg.mode || 'frp')
   const modeErr = validateMode(mode)
   if (modeErr) {
-    console.error(`[setup] 无效的隧道模式：${flags.mode}`)
+    sayErr(`无效的隧道模式：${flags.mode}`)
     return { action: 'exit', code: 1 }
   }
 
@@ -392,7 +396,7 @@ export async function ensureConfigured(argv = [], io = {}) {
       })
       if (picked === undefined) {
         console.log('')
-        console.log('[setup] 已取消，未写入任何配置。')
+        say('已取消，未写入任何配置。')
         return { action: 'exit', code: 1 }
       }
       mode = picked
@@ -419,7 +423,7 @@ export async function ensureConfigured(argv = [], io = {}) {
     const collected = await collectFields(specs, nonTty, ensureRl())
     if (collected.aborted) {
       console.log('')
-      console.log('[setup] 已取消，未写入任何配置。')
+      say('已取消，未写入任何配置。')
       return { action: 'exit', code: 1 }
     }
     if (collected.error) return { action: 'exit', code: 1 }
@@ -452,29 +456,22 @@ export async function ensureConfigured(argv = [], io = {}) {
     } else if (mode === 'ssh') {
       const check = sshSelfCheck({ host: values.host, port: values.port, user: values.user, keyPath: values.keyPath })
       if (check.status === 'ssh-not-found' || check.status === 'host-key-unverified' || check.status === 'auth-failed') {
-        console.error(`[setup] SSH 连通性自检未通过（${check.status}）`)
-        console.error(`[setup]   ${check.hint}`)
-        console.error('[setup] 配置已保存；修复后直接 npm start 即可，不会再提问。')
+        sayErr(`SSH 连通性自检未通过（${check.status}）：${check.hint}`)
+        sayErr('配置已保存；修复后直接 npm start 即可，不会再提问。')
         return { action: 'exit', code: 1 }
       }
       if (check.status !== 'ok') {
-        console.log(`[setup] 提示：SSH 连通性自检未通过（${check.status}）`)
-        console.log(`[setup]   ${check.hint}`)
-        console.log('[setup]   已继续启动，ssh 隧道会持续重连。')
+        say(`提示：SSH 连通性自检未通过（${check.status}）：${check.hint}；已继续启动，隧道会持续重连。`)
       }
     }
 
-    console.log('[setup] 配置完成：')
-    if (mode === 'frp') {
-      console.log(`[setup]   隧道: frp → ${values.serverAddr}:${values.serverPort}`)
-    } else if (mode === 'ssh') {
-      console.log(`[setup]   隧道: ssh → ${values.user}@${values.host}:${values.port}`)
-      console.log(`[setup]   私钥: ${values.keyPath}`)
-    } else {
-      console.log('[setup]   模式: lan（局域网直连，无隧道）')
-    }
-    if (mode !== 'lan') console.log(`[setup]   公网域名: ${values.domain}`)
-    console.log('[setup] 已写入 config.json' + (mode === 'frp' ? ' 与 frp/frpc.toml' : '') + '（网关 token 由 gateway 自动生成）')
+    // 汇总一行带过：模式/隧道/域名/落盘文件
+    const desc = mode === 'frp'
+      ? `frp → ${values.serverAddr}:${values.serverPort}，域名 ${values.domain}`
+      : mode === 'ssh'
+        ? `ssh → ${values.user}@${values.host}:${values.port}（私钥 ${values.keyPath}），域名 ${values.domain}`
+        : 'lan（局域网直连，无隧道）'
+    say(`配置完成：${desc}；已写入 config.json` + (mode === 'frp' ? ' 与 frp/frpc.toml' : ''))
     return { action: 'configured' }
   } finally {
     if (rl) rl.close()

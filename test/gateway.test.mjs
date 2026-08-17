@@ -45,6 +45,8 @@ before(async () => {
       DSH_GATE_TOKEN: TOKEN,
       DSH_GATE_PORT: String(GATE_PORT),
       DSH_GATE_TARGET_PORT: String(UP_PORT),
+      // 固定绑 127.0.0.1：否则网关会读仓库里真实 config.json 的 mode（用户当前可能是 lan），测试不再密封
+      DSH_GATE_BIND: '127.0.0.1',
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   })
