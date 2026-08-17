@@ -115,7 +115,7 @@ function fillForm(cfg) {
   set('ssh.user', cfg.ssh?.user)
   set('ssh.keyPath', cfg.ssh?.keyPath)
   set('domain', cfg.domain)
-  set('token', '') // 令牌留空 = 不修改；不回显当前令牌到输入框
+  set('token', cfg.token) // 回显当前令牌：面板仅本机且已鉴权，登录链接/二维码本就印着令牌
 }
 
 function selectedMode() {
@@ -180,9 +180,7 @@ async function saveConfig(ev) {
     if (r.ok) {
       msg.classList.add('ok')
       msg.textContent = r.newToken ? '已保存并重启；令牌已轮换，旧登录态全部失效' : '已保存，网关与隧道重启中…'
-      const tokenEl = $('[name="token"]')
-      if (tokenEl) tokenEl.value = ''
-      setTimeout(refreshAll, 1200)
+      setTimeout(refreshAll, 1200) // 重新拉取配置刷新表单，含轮换后的新令牌
     } else {
       const extra = showErrors(r.errors)
       msg.classList.add('err')

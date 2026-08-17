@@ -120,7 +120,7 @@ proxy_send_timeout 600s;
 ## 测试
 
 ```bash
-npm test   # 73 项：mock 上游 + 网关子进程冒烟、配置库、面板服务（令牌登录/CSRF/SSE）、日志过滤、补丁锚点、waitExit 热重启原语
+npm test   # 78 项：mock 上游 + 网关子进程冒烟、配置库、面板服务（令牌登录/CSRF/SSE）、日志过滤、补丁锚点、waitExit 热重启原语
 ```
 
 > 真机端到端（SSH 反向隧道 / LAN 局域网直连）的逐步清单见 [`TESTING.md`](TESTING.md)。
