@@ -166,7 +166,7 @@ h2 {
   display: block;
   margin: 0 auto; /* 栏内居中 */
   background: #fff;
-  padding: 8px;
+  padding: 6px;
   image-rendering: pixelated;
 }
 

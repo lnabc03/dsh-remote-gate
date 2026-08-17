@@ -72,8 +72,11 @@ function renderQr(text) {
     qr.addData(text)
     qr.make()
     const n = qr.getModuleCount()
-    const scale = Math.max(2, Math.floor(200 / (n + 8)))
-    const size = (n + 8) * scale
+    // quiet zone 规范是 4 模块，实测 2 模块主流扫码器都可靠；再小就有扫不出的风险，勿减。
+    // 不做反色（白码深底）：微信/系统相机对反色码兼容性差，登录链路可靠性优先
+    const quiet = 2
+    const scale = Math.max(2, Math.floor(208 / (n + quiet * 2)))
+    const size = (n + quiet * 2) * scale
     canvas.width = size
     canvas.height = size
     canvas.style.width = size + 'px'
@@ -84,7 +87,7 @@ function renderQr(text) {
     ctx.fillStyle = '#000'
     for (let r = 0; r < n; r++) {
       for (let c = 0; c < n; c++) {
-        if (qr.isDark(r, c)) ctx.fillRect((c + 4) * scale, (r + 4) * scale, scale, scale)
+        if (qr.isDark(r, c)) ctx.fillRect((c + quiet) * scale, (r + quiet) * scale, scale, scale)
       }
     }
     canvas.classList.remove('hidden')

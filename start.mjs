@@ -513,15 +513,22 @@ export function appBrowserCandidates(platform = process.platform, env = process.
   return out
 }
 
+// 面板应用窗口默认尺寸；DSH_GATE_PANEL_WINSIZE="宽x高"（如 1600x900）覆盖
+export function panelWindowSize(env = process.env) {
+  const m = /^\s*(\d{3,4})\s*[x,]\s*(\d{3,4})\s*$/.exec(env.DSH_GATE_PANEL_WINSIZE || '')
+  return { w: m ? +m[1] : 1440, h: m ? +m[2] : 860 }
+}
+
 function openInBrowser(url) {
   if (process.env.DSH_GATE_NO_OPEN) return
   try {
     if (process.platform === 'win32') {
       for (const bin of appBrowserCandidates()) {
         if (fs.existsSync(bin)) {
-          // --app=：无地址栏/标签页的独立窗口，接近原生应用体验
-          spawn(bin, ['--app=' + url], { detached: true, stdio: 'ignore', windowsHide: true }).unref()
-          say('start', `已用应用窗口打开控制面板（${path.basename(bin)}）`)
+          // --app=：无地址栏/标签页的独立窗口，接近原生应用体验；--window-size 固定初始尺寸
+          const { w, h } = panelWindowSize()
+          spawn(bin, ['--app=' + url, `--window-size=${w},${h}`], { detached: true, stdio: 'ignore', windowsHide: true }).unref()
+          say('start', `已用应用窗口打开控制面板（${path.basename(bin)}，${w}×${h}）`)
           return
         }
       }

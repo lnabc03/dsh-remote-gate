@@ -2,7 +2,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
-import { shouldIgnoreLine, FRPC_IGNORE, CF_IGNORE, CF_IGNORE_RE, extractCfUrl, waitExit } from '../start.mjs'
+import { shouldIgnoreLine, FRPC_IGNORE, CF_IGNORE, CF_IGNORE_RE, extractCfUrl, waitExit, panelWindowSize } from '../start.mjs'
 
 test('shouldIgnoreLine：frpc 的 pool-full 告警被过滤', () => {
   const noisy = '2026-08-17 00:38:19 [E] [client/control.go:153] StartWorkConn contains error: work connection pool is full, discarding'
@@ -117,4 +117,12 @@ test('waitExit：进程不退出时按超时兜底 resolve', async () => {
   } finally {
     p.kill('SIGKILL')
   }
+})
+
+test('panelWindowSize：默认 1440×860，环境变量可覆盖，非法值回退默认', () => {
+  assert.deepEqual(panelWindowSize({}), { w: 1440, h: 860 })
+  assert.deepEqual(panelWindowSize({ DSH_GATE_PANEL_WINSIZE: '1600x900' }), { w: 1600, h: 900 })
+  assert.deepEqual(panelWindowSize({ DSH_GATE_PANEL_WINSIZE: '1366,768' }), { w: 1366, h: 768 })
+  assert.deepEqual(panelWindowSize({ DSH_GATE_PANEL_WINSIZE: 'abc' }), { w: 1440, h: 860 })
+  assert.deepEqual(panelWindowSize({ DSH_GATE_PANEL_WINSIZE: '99x99' }), { w: 1440, h: 860 })
 })

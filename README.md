@@ -98,6 +98,7 @@ proxy_send_timeout 600s;
 | env | `DSH_GATE_TOKEN` | — | 访问令牌（设置后不再读写 config.json） |
 | env | `DSH_GATE_DOMAIN` | — | 公网域名，打印登录链接用（`config.json` 的 `domain` 同效；lan/cf 模式忽略） |
 | env | `DSH_GATE_PANEL_PORT` | `3089` | 控制面板端口（占用时自动递增） |
+| env | `DSH_GATE_PANEL_WINSIZE` | `1440x860` | 面板 `--app` 窗口初始尺寸（宽x高，仅 Chrome/Edge 应用窗口生效） |
 | env | `DSH_GATE_NO_OPEN` | — | 置 1 禁止启动时自动打开面板窗口 |
 | `config.json` | `token` / `port` / `targetPort` / `domain` | — | 同上，文件形式；`domain` 由面板写入 |
 | `config.json` | `mode` | `frp` | 访问模式：`frp` / `ssh` / `lan` / `cf`（缺省 frp，向后兼容；cf 无额外字段） |
