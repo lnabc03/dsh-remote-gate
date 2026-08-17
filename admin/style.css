@@ -72,6 +72,18 @@ h2 {
 .muted { color: var(--text-2); font-size: 12px; line-height: 1.5; }
 .hidden { display: none !important; }
 
+/* 启动器断连横幅（SSE 持续断开 8s 后亮起，见 app.js connectLogs） */
+.offline-bar {
+  position: fixed;
+  top: 0; left: 0; right: 0;
+  z-index: 99;
+  padding: 5px 12px;
+  background: var(--bad);
+  color: #fff;
+  font: 500 12px/1.6 var(--font-ui);
+  text-align: center;
+}
+
 /* ---- 顶栏（44px，strong 下边框） ------------------------------------------- */
 .topbar {
   flex: none;

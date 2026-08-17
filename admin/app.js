@@ -247,6 +247,12 @@ function appendLog(entry) {
   if (pane.scrollHeight - pane.scrollTop - pane.clientHeight < 80) pane.scrollTop = pane.scrollHeight
 }
 
+let offlineTimer = null
+function setOffline(on) {
+  $('#offlineBar').classList.toggle('hidden', !on)
+  document.title = on ? '已断开 · DSH Remote Gate 控制面板' : 'DSH Remote Gate 控制面板'
+}
+
 function connectLogs() {
   const es = new EventSource('/api/logs')
   es.addEventListener('log', (ev) => {
@@ -255,8 +261,15 @@ function connectLogs() {
   es.addEventListener('status', (ev) => {
     try { renderStatus(JSON.parse(ev.data)) } catch { }
   })
+  es.onopen = () => {
+    clearTimeout(offlineTimer)
+    setOffline(false)
+  }
   es.onerror = () => {
-    // EventSource 自动重连；状态轮询兜底
+    // EventSource 自动重连；持续 8s 连不上说明启动器大概率已退出（看门狗随后会
+    // 直接关掉本窗口），先亮离线横幅避免「静默挂掉」
+    clearTimeout(offlineTimer)
+    offlineTimer = setTimeout(() => setOffline(true), 8000)
   }
 }
 

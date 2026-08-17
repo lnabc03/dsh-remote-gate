@@ -21,6 +21,8 @@ npm start          # Windows 也可直接双击 start.bat
 
 首次启动自动打开**本地控制面板**（Chrome/Edge 应用窗口；`--no-ui` 可关闭）：选模式、填字段、保存——保存即写入 `config.json` 并自动重启网关与隧道（dsh 不动，保护正在运行的 agent 会话）。面板首页展示带令牌的登录链接和**二维码**，手机扫码即登录（种下一年有效的 HttpOnly Cookie，之后直接访问即可）。面板还提供子进程状态灯、实时日志流、令牌管理。
 
+窗口关系（Windows 双击 `start.bat`）：命令行控制台**自动最小化到任务栏**（日志随时点开看；若面板没弹出来，到那里找原因），日常可见的只有面板一个窗口。面板窗口被误关时，在控制台**按回车**重新打开；控制台退出（包括被直接 X 掉）时，看门狗进程会自动把面板窗口一并关闭，不会留下静默挂着的界面。
+
 改配置/切模式都在面板完成；`config.json` 是唯一配置数据源（`frp/frpc.toml` 是生成产物，勿手动编辑）。
 
 ## 选哪种模式
@@ -116,7 +118,7 @@ proxy_send_timeout 600s;
 ## 测试
 
 ```bash
-npm test   # 85 项：mock 上游 + 网关/面板/配置库/补丁锚点等
+npm test   # 87 项：mock 上游 + 网关/面板/配置库/补丁锚点/看门狗等
 ```
 
 真机端到端清单见 [`TESTING.md`](TESTING.md)；踩坑记录与修复设计见 [`PITFALLS.md`](PITFALLS.md)；开发约束与文件职责见 [`AGENTS.md`](AGENTS.md)。
@@ -126,7 +128,8 @@ npm test   # 85 项：mock 上游 + 网关/面板/配置库/补丁锚点等
 | 路径 | 作用 |
 | --- | --- |
 | `gateway.mjs` | 网关本体：令牌认证 + 反代 + WS 隧道 + PWA 注入 + 流量统计 + 长响应保活 |
-| `start.mjs` / `start.bat` | 一键启动（面板 + dsh web + 网关 + 隧道，单窗口） |
+| `start.mjs` / `start.bat` | 一键启动（面板 + dsh web + 网关 + 隧道；bat 启动的控制台自动最小化） |
+| `watchdog.mjs` | 面板看门狗：控制台意外死亡时自动关闭面板窗口 |
 | `admin.mjs` + `admin/` | 本地控制面板（QR 库、字体、图标均 vendored 于 `admin/vendor/`） |
 | `config-lib.mjs` / `setup.mjs` | 配置读写校验 / 隧道参数构造纯函数库 |
 | `patch-dsh.mjs` | 幂等补丁 DSH client-runtime（修提问弹窗、断帧修复改增量合并省流量） |

@@ -8,7 +8,9 @@
 //   - cloudflared（cf 模式）：致命，退出团灭——重拨必然换新临时域名，旧入口静默失效不如明说
 //   - ssh 反向隧道：非致命，退出后自动重拨（弱网/服务器重启不断链）
 //   - lan 模式：无隧道，网关绑 0.0.0.0 局域网直连（首次可能弹防火墙提示）
-//   - Ctrl+C 同时终止全部（Windows 下对派生树用 taskkill /T）
+//   - Ctrl+C 同时终止全部（Windows 下对派生树用 taskkill /T），并关闭面板应用窗口
+//   - 面板看门狗（watchdog.mjs，detached）：控制台被 X / 崩溃时 Node 收不到任何信号，
+//     由看门狗发现父进程死亡后关闭面板窗口，避免面板静默挂着
 //   - 进程代际（gen）：面板触发的重启会使旧进程的退出/重连回调失效，不会被误判为崩溃团灭
 
 import { spawn, execFile, execSync } from 'node:child_process'
@@ -29,6 +31,7 @@ import {
 } from './config-lib.mjs'
 import { startPanel } from './admin.mjs'
 import { patchDsh } from './patch-dsh.mjs'
+import { killPanelBrowser } from './watchdog.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const DSH_PORT = 3080
@@ -69,6 +72,7 @@ const state = {
   gate: { proc: null, gen: 0 },
   tunnel: { tag: null, proc: null, gen: 0 },
   panel: null,
+  watchdog: null,  // 面板看门狗子进程（detached，见 watchdog.mjs）
 }
 
 const procRunning = (p) => !!p && p.exitCode === null && !p.killed
@@ -112,6 +116,10 @@ function waitExit(p, timeoutMs = 3000) {
 function shutdown(code = 0) {
   if (shuttingDown) return
   shuttingDown = true
+  // 先杀看门狗，再主动关面板窗口（不 await：温和关窗有 1.5s 宽限，shutdown 不等；
+  // 派生的 powershell 会跑完）。意外死亡（控制台被 X）时这两步都没机会跑，由看门狗兜底。
+  if (state.watchdog) killTree(state.watchdog)
+  killPanelBrowser(panelProfileDir()).catch(() => { })
   for (const p of procs) killTree(p)
   try { state.panel?.close() } catch { }
   setTimeout(() => process.exit(code), 500).unref()
@@ -560,6 +568,7 @@ function openInBrowser(url) {
             '--app=' + url,
             `--window-size=${w},${h}`
           ], { detached: true, stdio: 'ignore', windowsHide: true }).unref()
+          startWatchdog()
           say('start', `已用应用窗口打开控制面板（${path.basename(bin)}，${w}×${h}）`)
           return
         }
@@ -574,6 +583,20 @@ function openInBrowser(url) {
   } catch {
     say('start', '自动打开浏览器失败，请手动复制上面的面板地址访问')
   }
+}
+
+// 面板看门狗：本进程意外死亡（控制台被 X / 崩溃 / 被杀）时，由它发现后关闭面板
+// 应用窗口——CTRL_CLOSE_EVENT 下 Node 收不到信号，自己没机会清理（约束 6 同源）。
+// 正常关停走 shutdown() 里的 killPanelBrowser，看门狗只管意外死亡。
+function startWatchdog() {
+  if (state.watchdog && alive(state.watchdog)) return
+  try {
+    const p = spawn(process.execPath, [path.join(__dirname, 'watchdog.mjs'), String(process.pid), panelProfileDir()], {
+      detached: true, stdio: 'ignore', windowsHide: true,
+    })
+    p.unref()
+    state.watchdog = p
+  } catch { /* 看门狗是增强不是必需，失败不影响主流程 */ }
 }
 
 function printStartUsage() {
@@ -651,6 +674,13 @@ async function main() {
       })
       say('start', `控制面板: ${state.panel.url}`)
       openInBrowser(state.panel.url)
+      // 面板窗口被误关时，回控制台按回车重新打开（start.bat 启动的控制台最小化在任务栏）
+      if (process.stdin.isTTY) {
+        say('start', '面板窗口被关掉时，在本控制台按回车可重新打开')
+        process.stdin.on('data', (d) => {
+          if (/\r|\n/.test(String(d)) && state.panel) openInBrowser(state.panel.url)
+        })
+      }
     } catch (err) {
       sayErr('start', `控制面板启动失败: ${err.message}（继续以纯命令行模式运行）`)
     }
