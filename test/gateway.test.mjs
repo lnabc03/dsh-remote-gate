@@ -56,6 +56,28 @@ before(async () => {
       }, 600)
       return
     }
+    if (req.url.startsWith('/api/commands/execute')) {
+      const mode = new URL(req.url, 'http://x').searchParams.get('case')
+      if (mode === 'slow') {
+        // 宽限期（测试 120ms）后才响应 → 触发 drip 提交
+        setTimeout(() => {
+          res.writeHead(200, { 'Content-Type': 'application/json' })
+          res.end('{"rpcId":"r","result":{"ok":true}}')
+        }, 600)
+        return
+      }
+      if (mode === 'late-error') {
+        setTimeout(() => {
+          res.writeHead(500, { 'Content-Type': 'application/json' })
+          res.end('{"error":"boom"}')
+        }, 600)
+        return
+      }
+      // 宽限期内响应 → 正常透传
+      res.writeHead(201, { 'Content-Type': 'application/json' })
+      res.end('{"fast":true}')
+      return
+    }
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
     res.end(HTML_PAGE)
   })
@@ -71,6 +93,9 @@ before(async () => {
       DSH_GATE_BIND: '127.0.0.1',
       // 加速心跳便于测试 102 Processing（生产默认 25s）
       DSH_GATE_HEARTBEAT_MS: '80',
+      // 加速 drip 宽限/滴答（生产默认 20s/25s）
+      DSH_GATE_DRIP_GRACE_MS: '120',
+      DSH_GATE_DRIP_MS: '80',
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   })
@@ -232,6 +257,70 @@ test('快响应不触发 102 心跳（普通 API 请求无中间响应）', asyn
   const res = await rawGet('/api/data', { Cookie: cookie })
   assert.equal(res.status, 200)
   assert.equal(res.raw.toString(), '{"ok":true}')
+})
+
+test('WebKit UA 不下发 102 心跳（Safari/iOS fetch 遇 1xx 直接 Load failed）', async () => {
+  const cookie = await loginCookie()
+  const reply = await rawPost('/api/slow', {
+    Cookie: cookie,
+    'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
+  })
+  assert.ok(!reply.raw.includes('102 Processing'), 'WebKit 客户端不应收到任何 1xx 中间响应')
+  assert.match(reply.raw, /\{"slow":true\}/)
+})
+
+// 裸 TCP POST，记录首字节时间：undici/http.request 会吞掉中间响应和分块细节，测保活必须看原始流
+function rawPost(p, headers) {
+  return new Promise((resolve, reject) => {
+    const t0 = Date.now()
+    let firstDataMs = -1
+    const sock = net.connect(GATE_PORT, '127.0.0.1', () => {
+      const hs = Object.entries(headers).map(([k, v]) => k + ': ' + v + '\r\n').join('')
+      sock.write('POST ' + p + ' HTTP/1.1\r\n' +
+        'Host: 127.0.0.1\r\n' + hs +
+        'Content-Type: application/json\r\n' +
+        'Content-Length: 2\r\n' +
+        'Connection: close\r\n\r\n{}')
+    })
+    let buf = ''
+    sock.on('data', (d) => { if (firstDataMs < 0) firstDataMs = Date.now() - t0; buf += d.toString('latin1') })
+    sock.on('end', () => resolve({ raw: buf, firstDataMs }))
+    sock.on('error', reject)
+    setTimeout(() => reject(new Error('rawPost timeout')), 8000)
+  })
+}
+
+test('drip：commands/execute 慢响应提前提交 200+chunked 保活，最终 JSON 完好（无 1xx）', async () => {
+  const cookie = await loginCookie()
+  // 用 WebKit UA 走一遍最不利组合：WebKit 既不能收 1xx，又最怕代理掐线
+  const { raw, firstDataMs } = await rawPost('/api/commands/execute?case=slow', {
+    Cookie: cookie,
+    'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148',
+  })
+  // 上游 600ms 才响应，但 drip 宽限 120ms 就提交 → 首字节必须远早于上游完成
+  assert.ok(firstDataMs >= 0 && firstDataMs < 500, `drip 应在宽限期即给出首字节，实际 ${firstDataMs}ms`)
+  assert.ok(!raw.includes('102 Processing'), 'drip 路径不应出现 102')
+  assert.match(raw, /HTTP\/1\.1 200 OK/)
+  assert.match(raw, /[Tt]ransfer-[Ee]ncoding: chunked/)
+  // 空格 drip chunk（chunked 编码下是 "1\r\n \r\n"），且 JSON 正文最终完好到达
+  assert.match(raw, /\r\n1\r\n \r\n/)
+  assert.match(raw, /\{"rpcId":"r","result":\{"ok":true\}\}/)
+})
+
+test('drip 快路径：宽限期内上游已响应 → 状态码原样透传，不介入 chunked', async () => {
+  const cookie = await loginCookie()
+  const res = await fetch(base() + '/api/commands/execute', { method: 'POST', headers: { Cookie: cookie }, body: '{}' })
+  assert.equal(res.status, 201)
+  assert.equal(await res.text(), '{"fast":true}')
+})
+
+test('drip 迟到错误：宽限期后上游才回非 200 → 客户端按 200 收到错误正文；上游请求被摘除 accept-encoding', async () => {
+  const cookie = await loginCookie()
+  const res = await fetch(base() + '/api/commands/execute?case=late-error', { method: 'POST', headers: { Cookie: cookie }, body: '{}' })
+  assert.equal(res.status, 200) // 已提交，真实 500 无法传达（有意取舍）
+  // 前导空格是 drip 保活字节，JSON.parse/response.json() 容忍
+  assert.equal((await res.text()).trim(), '{"error":"boom"}')
+  assert.ok(!('accept-encoding' in lastUpstreamHeaders), 'drip 路径必须摘除 accept-encoding（已提交响应无法再声明 content-encoding）')
 })
 
 test('/pwa/* 豁免认证（iOS 安装图标不带 Cookie），其余路径仍拦 401', async () => {

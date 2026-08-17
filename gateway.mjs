@@ -273,10 +273,32 @@ const GZIP_TYPE = /^(text\/|application\/(json|javascript|manifest\+json|xml|was
 const GZIP_MIN = 1024 // 太小的响应压缩反而膨胀
 
 // 长响应保活：上游迟迟不给响应头时（/compact 这类同步长命令轻松超过 60s），隧道链路上的
-// 中间反代（nginx 默认 proxy_read_timeout 60s）会先把连接掐成 504。在等响应头阶段周期性
-// 下发 102 Processing 中间响应（HTTP/1.1 合法 1xx，浏览器 fetch 透明忽略），重置沿途读超时。
-// 上游响应头一到即停止：此后的本地缓冲/透传都是毫秒级，不再需要。DSH_GATE_HEARTBEAT_MS 可调，0 关闭。
+// 中间反代（nginx 默认 proxy_read_timeout 60s）会先把连接掐成 504。两条互补机制：
+//
+// 1) 102 心跳（通用慢路径）：等响应头阶段周期性下发 102 Processing 中间响应（HTTP/1.1
+//    合法 1xx，Chromium/Firefox fetch 透明忽略），重置沿途读超时。上游响应头一到即停。
+//    DSH_GATE_HEARTBEAT_MS 可调，0 关闭。**WebKit 客户端不发**：Safari/iOS 的 fetch 对
+//    1xx 中间响应有已知 bug（同 Cloudflare 103 Early Hints 打挂 Safari 一案），收到 102
+//    后最终响应到达时 fetch 直接以 "Load failed" 拒绝（命令已在服务端执行完，客户端却报错）。
+//
+// 2) drip（仅 POST /api/commands/execute，同步长命令的专属通道，WebKit 安全）：宽限期
+//    （DSH_GATE_DRIP_GRACE_MS，默认 20s，小于一切常见代理读超时）内上游未响应，则抢先
+//    向客户端提交「200 + chunked」，此后每 DSH_GATE_DRIP_MS 滴一个空格 chunk 保活——
+//    有字节流动，沿途读超时（含 CF 边缘 100s TTFP/524）全部被重置；JSON 容忍前导空白，
+//    response.json()/JSON.parse 不受影响。宽限期内就到了的响应走正常透传，状态码无损。
+//    代价：宽限期后才失败的命令无法传达真实 HTTP 状态（客户端按 200 收到错误正文）——
+//    命令校验类错误都是秒回，只有真正跑长的命令才可能踩到，可接受。
 const HEARTBEAT_MS = Number(process.env.DSH_GATE_HEARTBEAT_MS ?? 25_000)
+const DRIP_PATH = '/api/commands/execute'
+const DRIP_GRACE_MS = Number(process.env.DSH_GATE_DRIP_GRACE_MS ?? 20_000)
+const DRIP_MS = Number(process.env.DSH_GATE_DRIP_MS ?? 25_000)
+
+// WebKit fetch 遇 1xx 中间响应会炸；iOS 上所有浏览器（含 CriOS/FxiOS/EdgiOS）都是 WebKit
+function isWebKit(req) {
+  const ua = String(req.headers['user-agent'] || '')
+  if (/iP(hone|ad|od)/.test(ua)) return true
+  return ua.includes('Macintosh') && ua.includes('Safari/') && !/Chrom(e|ium)\/|Edg\//.test(ua)
+}
 
 function forward(req, res) {
   const clientGzip = /\bgzip\b/.test(String(req.headers['accept-encoding'] || ''))
@@ -292,20 +314,59 @@ function forward(req, res) {
   }
   res.write = (chunk, ...rest) => { countChunk(chunk); return resWrite(chunk, ...rest) }
   res.end = (chunk, ...rest) => { countChunk(chunk); return resEnd(chunk, ...rest) }
+  const isDrip = DRIP_GRACE_MS > 0 && req.method === 'POST' && pathKey === DRIP_PATH
   let heartbeat = null
-  if (HEARTBEAT_MS > 0 && req.httpVersion !== '1.0') {
+  if (!isDrip && !isWebKit(req) && HEARTBEAT_MS > 0 && req.httpVersion !== '1.0') {
     heartbeat = setInterval(() => {
       try { if (!res.headersSent && !res.writableEnded) res.writeProcessing() } catch { }
     }, HEARTBEAT_MS)
     heartbeat.unref?.()
   }
   const stopHeartbeat = () => { if (heartbeat !== null) { clearInterval(heartbeat); heartbeat = null } }
+  // drip：宽限期后抢先提交 200 + chunked，再周期滴空格保活（见上方机制 2）
+  let dripTimer = null, dripBeat = null, dripCommitted = false
+  const stopDrip = () => {
+    if (dripTimer !== null) { clearTimeout(dripTimer); dripTimer = null }
+    if (dripBeat !== null) { clearInterval(dripBeat); dripBeat = null }
+  }
+  if (isDrip) {
+    dripTimer = setTimeout(() => {
+      dripTimer = null
+      if (res.headersSent || res.writableEnded) return
+      dripCommitted = true
+      try {
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' })
+        res.write(' ')
+        if (DRIP_MS > 0) {
+          dripBeat = setInterval(() => {
+            try { if (!res.writableEnded) res.write(' ') } catch { }
+          }, DRIP_MS)
+          dripBeat.unref?.()
+        }
+      } catch { }
+    }, DRIP_GRACE_MS)
+    dripTimer.unref?.()
+  }
+  const upHeaders = cleanHeaders(req)
+  // drip 路径已按 200 提交、无法再声明 content-encoding，强制上游回 identity
+  if (isDrip) delete upHeaders['accept-encoding']
   const upstream = http.request({
     host: TARGET_HOST, port: TARGET_PORT,
     method: req.method, path: req.url,
-    headers: cleanHeaders(req),
+    headers: upHeaders,
   }, (upRes) => {
     stopHeartbeat()
+    if (dripCommitted) {
+      stopDrip()
+      // 已按 200 提交：真实状态码无法传达，只能力保正文送达（见上方机制 2 的代价说明）
+      if (upRes.statusCode !== 200) {
+        console.log(`[gate] commands/execute 宽限期后上游才回 HTTP ${upRes.statusCode}，客户端已按 200 接收正文`)
+      }
+      upRes.pipe(res)
+      upRes.on('error', () => { try { res.end() } catch { } })
+      return
+    }
+    stopDrip()
     const h = { ...upRes.headers }
     const ct = String(h['content-type'] || '')
     const ce = String(h['content-encoding'] || '')
@@ -354,12 +415,13 @@ function forward(req, res) {
   })
   upstream.on('error', () => {
     stopHeartbeat()
+    stopDrip()
     try {
       if (!res.headersSent) res.writeHead(502, { 'Content-Type': 'text/plain; charset=utf-8' })
       res.end('Bad Gateway: DSH Web UI 不可达，请确认 dsh web 已启动')
     } catch { }
   })
-  res.on('close', () => { stopHeartbeat(); try { upstream.destroy() } catch { } })
+  res.on('close', () => { stopHeartbeat(); stopDrip(); try { upstream.destroy() } catch { } })
   req.on('data', (c) => meterUp(c.length))
   req.pipe(upstream)
 }

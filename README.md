@@ -48,7 +48,7 @@ npm start
 - **frp 模式**：需先下载 frpc（见下），问 frps 地址/端口（默认 7000）/token/域名
 - **ssh 模式**：无需下载任何二进制（用系统自带 OpenSSH），问服务器地址/端口（默认 22）/用户名/私钥路径（默认 `~/.ssh/id_ed25519`）/域名
 - **lan 模式**：无需服务器、无需任何字段，网关绑 `0.0.0.0` 局域网直连（首次可能弹 Windows 防火墙提示，点「允许」）。打印的 IP 按系统默认路由选取（自动避开 VMware/Hyper-V 虚拟网卡），横幅同时列出其余候选 IP 供替换；校园网/企业 Wi-Fi 常开 AP 客户端隔离导致手机够不到电脑，可用「手机开热点、电脑连热点」排除
-- **cf 模式**：无需服务器、无需 Cloudflare 账号、无需域名——只需下载 cloudflared 二进制放进 `cf/`（见 [`cf/README.md`](cf/README.md)）。每次启动分配 `*.trycloudflare.com` 临时域名，启动日志打印带令牌的登录链接，需重新发到手机（旧链接随上次进程退出失效）。**代价**：入口不固定，PWA「添加到主屏幕」每次重启即作废（退化为浏览器标签页使用）；Cloudflare 免费层有 100 秒无响应硬超时（524），`/compact` 这类同步长命令超过 100s 会失败（SSE 流式输出不受影响）；TLS 在 CF 边缘终止，明文对 CF 可见（信任对象从自己的服务器换成 CF）；大陆访问 CF 边缘的延迟/稳定性因运营商和时段而异，建议先实测再决定是否替代 frp
+- **cf 模式**：无需服务器、无需 Cloudflare 账号、无需域名——只需下载 cloudflared 二进制放进 `cf/`（见 [`cf/README.md`](cf/README.md)）。每次启动分配 `*.trycloudflare.com` 临时域名，启动日志打印带令牌的登录链接，需重新发到手机（旧链接随上次进程退出失效）。**代价**：入口不固定，PWA「添加到主屏幕」每次重启即作废（退化为浏览器标签页使用）；Cloudflare 免费层有 100 秒无响应硬超时（524），网关的 drip 保活（`DSH_GATE_DRIP_*`）对 `/compact` 这类同步长命令会在宽限期内抢先给出首字节并周期滴包，预期可绕开该限制（未经长时间实机验证，若仍遇 524 属 CF 产品限制）；SSE 流式输出本身不受影响；TLS 在 CF 边缘终止，明文对 CF 可见（信任对象从自己的服务器换成 CF）；大陆访问 CF 边缘的延迟/稳定性因运营商和时段而异，建议先实测再决定是否替代 frp
 
 已配置后每次启动直接拉起全部进程；改配置/切模式都在控制面板完成（保存即自动重启网关与隧道生效），不再有命令行提问。
 
@@ -66,7 +66,12 @@ https://<随机串>.trycloudflare.com/?t=<token>     # cf 模式（每次启动�
 
 **lan / cf 模式无需服务器**。frp/ssh 模式：反代（Nginx/Caddy）把域名 HTTPS 流量转到隧道暴露的端口，并带上 `X-Forwarded-Proto: https` 头（用于给 Cookie 加 `Secure`；cf 模式由网关强制，不依赖此头）。
 
-反代必须调大读超时：dsh 的 `/api/commands/execute`（如 /compact）是**同步长任务**，响应在命令执行完才一次性返回，期间没有任何字节流动——Nginx 默认 `proxy_read_timeout 60s` 会直接 504。**网关已内置缓解**：等上游响应头期间每 25s 向客户端发一次 `102 Processing` 中间响应（HTTP/1.1 合法 1xx，浏览器透明忽略，见 `DSH_GATE_HEARTBEAT_MS`），沿途反代的读超时会被不断重置，默认 60s 的 Nginx 也能扛住分钟级命令。但仍建议在 Nginx 该 location 加（双保险，且对 WebSocket 长连接同样必要；Caddy 默认无读超时，无需配置）：
+反代必须调大读超时：dsh 的 `/api/commands/execute`（如 /compact）是**同步长任务**，响应在命令执行完才一次性返回，期间没有任何字节流动——Nginx 默认 `proxy_read_timeout 60s` 会直接 504。**网关已内置两层缓解**：
+
+1. **drip**（仅 `POST /api/commands/execute`，见 `DSH_GATE_DRIP_GRACE_MS`/`DSH_GATE_DRIP_MS`）：上游 20s 未响应则抢先向客户端提交「200 + chunked」，此后每 25s 滴一个空格 chunk 保活——有字节流动，沿途一切读超时（含 CF 的 100s 524）都被重置；JSON 容忍前导空白，客户端解析不受影响。对 WebKit（iOS/Safari）也安全。
+2. **102 心跳**（其余慢路径，见 `DSH_GATE_HEARTBEAT_MS`）：等上游响应头期间每 25s 发一次 `102 Processing` 中间响应，Chromium/Firefox 透明忽略。**不对 WebKit 客户端启用**——Safari/iOS 的 fetch 遇 1xx 中间响应有 bug，最终响应到达时直接报 `Load failed`（命令其实在服务端执行完了）；iOS 上的长命令由 drip 兜底。
+
+默认 60s 的 Nginx 因此也能扛住分钟级命令。但仍建议在该 location 加（双保险，且对 WebSocket 长连接同样必要；Caddy 默认无读超时，无需配置）：
 
 ```nginx
 proxy_read_timeout 600s;
@@ -98,7 +103,8 @@ proxy_send_timeout 600s;
 | env | `DSH_GATE_PANEL_PORT` | `3089` | 控制面板端口（占用时自动递增） |
 | env | `DSH_GATE_PANEL_WINSIZE` | `1440x860` | 面板 `--app` 窗口初始尺寸（宽x高，仅 Chrome/Edge 应用窗口生效） |
 | env | `DSH_GATE_NO_OPEN` | — | 置 1 禁止启动时自动打开面板窗口 |
-| env | `DSH_GATE_HEARTBEAT_MS` | `25000` | 长响应保活：等上游响应头期间每该间隔下发一次 `102 Processing` 中间响应，重置隧道沿途反代（如 nginx 默认 60s `proxy_read_timeout`）的读超时，避免 `/compact` 这类分钟级同步命令被掐成 504；0 关闭 |
+| env | `DSH_GATE_HEARTBEAT_MS` | `25000` | 长响应保活（非 WebKit 客户端的通用慢路径）：等上游响应头期间每该间隔下发一次 `102 Processing` 中间响应，重置沿途反代读超时；0 关闭。**WebKit 自动豁免**（其 fetch 遇 1xx 报 `Load failed`），长命令走 drip |
+| env | `DSH_GATE_DRIP_GRACE_MS` | `20000` | drip（仅 `POST /api/commands/execute`）：上游超过该时长未响应，抢先提交 `200 + chunked` 并周期滴空格保活（`DSH_GATE_DRIP_MS`，默认 25000），对 WebKit 安全且能穿透 CF 100s 524；0 关闭。代价：宽限期后才失败的命令无法传达真实 HTTP 状态（客户端按 200 收到错误正文） |
 | `config.json` | `token` / `port` / `targetPort` / `domain` | — | 同上，文件形式；`domain` 由面板写入 |
 | `config.json` | `mode` | `frp` | 访问模式：`frp` / `ssh` / `lan` / `cf`（缺省 frp，向后兼容；cf 无额外字段） |
 | `config.json` | `frp.serverAddr` / `frp.serverPort` / `frp.authToken` | — | frp 模式专用（唯一数据源；`frp/frpc.toml` 为生成产物） |
@@ -119,7 +125,7 @@ proxy_send_timeout 600s;
 ## 测试
 
 ```bash
-npm test   # 81 项：mock 上游 + 网关子进程冒烟（含 102 保活心跳）、配置库、面板服务（令牌登录/CSRF/SSE）、日志过滤、补丁锚点、waitExit 热重启原语
+npm test   # 85 项：mock 上游 + 网关子进程冒烟（含 102 心跳 / WebKit 豁免 / drip 保活）、配置库、面板服务（令牌登录/CSRF/SSE）、日志过滤、补丁锚点、waitExit 热重启原语
 ```
 
 > 真机端到端（SSH 反向隧道 / LAN 局域网直连）的逐步清单见 [`TESTING.md`](TESTING.md)。
