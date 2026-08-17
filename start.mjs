@@ -551,7 +551,53 @@ export function clearSavedWindowPlacement(profileDir) {
   }
 }
 
-function openInBrowser(url) {
+// 面板浏览器进程态：{ procs: 命令行含 profile 路径的进程数, windows: 其中有可见主窗口的个数 }
+// （chromium 系被强杀后重启，进程会全起来但 --app 窗口可能不显示，靠这里探测）
+export function parsePanelBrowserState(stdout) {
+  const m = /(\d+)\s*,\s*(\d+)/.exec(String(stdout || ''))
+  return m ? { procs: Number(m[1]), windows: Number(m[2]) } : { procs: 0, windows: 0 }
+}
+
+function panelBrowserState(profileDir) {
+  if (process.platform !== 'win32') return Promise.resolve({ procs: 0, windows: 0 })
+  return new Promise((resolve) => {
+    const dir = String(profileDir).replace(/'/g, "''")
+    const script = [
+      `$p = @(Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -and $_.CommandLine.Contains('${dir}') } | Select-Object -ExpandProperty ProcessId)`,
+      `$w = 0; foreach ($i in $p) { try { if ((Get-Process -Id $i -ErrorAction Stop).MainWindowHandle -ne 0) { $w++ } } catch { } }`,
+      `Write-Output "$($p.Count),$w"`,
+    ].join('; ')
+    try {
+      execFile('powershell', ['-NoProfile', '-NonInteractive', '-Command', script], { windowsHide: true }, (err, stdout) => {
+        resolve(parsePanelBrowserState(stdout))
+      })
+    } catch {
+      resolve({ procs: 0, windows: 0 })
+    }
+  })
+}
+
+// 拉窗兜底：chromium 首次 --app 窗口偶尔「进程全起来但窗口不显示」（实测强杀后重启、
+// 偶发冷启动都会踩中）。进程在、无窗口时，再 spawn 一次会经单例 handoff 把窗口拉出来
+// （实测 ~1s）。只等 12s（健康机器窗口 <9s 即出，避免误判产生双窗口）；进程都没起来
+// （spawn 失败或用户秒关）则不重试。
+function verifyPanelWindow(bin, args, profileDir) {
+  ;(async () => {
+    for (let i = 0; i < 12; i++) {
+      await new Promise((r) => setTimeout(r, 1000))
+      const s = await panelBrowserState(profileDir)
+      if (s.windows > 0) return
+      if (i >= 2 && s.procs === 0) return
+    }
+    const s = await panelBrowserState(profileDir)
+    if (s.procs > 0 && s.windows === 0) {
+      say('start', '面板窗口未出现（浏览器进程已启动），重新拉起窗口')
+      spawn(bin, args, { detached: true, stdio: 'ignore', windowsHide: true }).unref()
+    }
+  })().catch(() => { })
+}
+
+async function openInBrowser(url) {
   if (process.env.DSH_GATE_NO_OPEN) return
   try {
     if (process.platform === 'win32') {
@@ -559,16 +605,23 @@ function openInBrowser(url) {
         if (fs.existsSync(bin)) {
           const { w, h } = panelWindowSize()
           const profileDir = panelProfileDir()
+          // 窗口已可见则跳过，避免 Enter 重开 / 重复启动产生第二个窗口
+          if ((await panelBrowserState(profileDir)).windows > 0) {
+            say('start', '控制面板窗口已在运行，未重复打开')
+            return
+          }
           fs.mkdirSync(profileDir, { recursive: true })
           clearSavedWindowPlacement(profileDir)
-          spawn(bin, [
+          const args = [
             `--user-data-dir=${profileDir}`,
             '--no-first-run',
             '--no-default-browser-check',
             '--app=' + url,
             `--window-size=${w},${h}`
-          ], { detached: true, stdio: 'ignore', windowsHide: true }).unref()
+          ]
+          spawn(bin, args, { detached: true, stdio: 'ignore', windowsHide: true }).unref()
           startWatchdog()
+          verifyPanelWindow(bin, args, profileDir)
           say('start', `已用应用窗口打开控制面板（${path.basename(bin)}，${w}×${h}）`)
           return
         }

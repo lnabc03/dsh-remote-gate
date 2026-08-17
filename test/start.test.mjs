@@ -5,7 +5,7 @@ import { spawn } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
-import { shouldIgnoreLine, FRPC_IGNORE, CF_IGNORE, CF_IGNORE_RE, extractCfUrl, waitExit, panelWindowSize, panelProfileDir, clearSavedWindowPlacement } from '../start.mjs'
+import { shouldIgnoreLine, FRPC_IGNORE, CF_IGNORE, CF_IGNORE_RE, extractCfUrl, waitExit, panelWindowSize, panelProfileDir, clearSavedWindowPlacement, parsePanelBrowserState } from '../start.mjs'
 
 test('shouldIgnoreLine：frpc 的 pool-full 告警被过滤', () => {
   const noisy = '2026-08-17 00:38:19 [E] [client/control.go:153] StartWorkConn contains error: work connection pool is full, discarding'
@@ -20,6 +20,14 @@ test('shouldIgnoreLine：只作用于 frpc tag，不影响 dsh/gate', () => {
   const noisy = 'work connection pool is full'
   assert.equal(shouldIgnoreLine('dsh', noisy), false)
   assert.equal(shouldIgnoreLine('gate', noisy), false)
+})
+
+test('parsePanelBrowserState：解析 "procs,windows" 输出', () => {
+  assert.deepEqual(parsePanelBrowserState('12,1'), { procs: 12, windows: 1 })
+  assert.deepEqual(parsePanelBrowserState('  9  ,  0 '), { procs: 9, windows: 0 })
+  assert.deepEqual(parsePanelBrowserState('0,0'), { procs: 0, windows: 0 })
+  assert.deepEqual(parsePanelBrowserState(''), { procs: 0, windows: 0 })
+  assert.deepEqual(parsePanelBrowserState('garbage'), { procs: 0, windows: 0 })
 })
 
 test('FRPC_IGNORE 非空且为字符串数组', () => {
