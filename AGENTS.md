@@ -4,6 +4,8 @@
 
 ## 技术栈与形态
 
+> 踩坑的「为什么」索引见 [`PITFALLS.md`](PITFALLS.md)（面向使用者/后续开发者）；本文件是约束与文件职责的权威来源。
+
 - 纯 Node ≥ 18，**零运行时依赖**，全部用 node: 内置模块——不要引入 npm 依赖（面板前端的 QR 库、Inter/JetBrains Mono 可变字体、鲸鱼图标是 vendored 资产 `admin/vendor/`，不是 npm 依赖，别换成包或 CDN 链接）
 - `gateway.mjs` 是网关服务进程（ESM 单文件，保持自包含、不 import 本仓库其他文件）；`start.mjs` 是进程编排器 + 控制面板宿主；面板服务拆在 `admin.mjs`，配置读写在 `config-lib.mjs`，校验纯函数在 `setup.mjs`
 - 测试：`npm test`（node:test + 起 mock 上游和网关子进程，端口随机化防冲突）
@@ -19,7 +21,7 @@
 6. **dsh 必须由 `start.mjs` 直接 `spawn(node, [dshBin, 'web'])` 启动，绝不能走 `npx`/`shell` 中转**。Windows 点窗口 X 关控制台发的是 `CTRL_CLOSE_EVENT`，Node 不触发 `SIGINT`/`SIGTERM`，`shutdown()` 里的 `taskkill /T` 根本不执行；`npx → cmd → dsh web` 深层进程脱离控制台成为孤儿（下次 `probeDsh` 复用残留，补丁/改动都不生效）。直接子进程则随控制台一起退出，Ctrl+C 的 `taskkill /T` 也少两层中间进程、杀得更干净。
 7. **ssh 反向隧道**：`ssh -R 3088:127.0.0.1:3088`，`remotePort` 固定 3088（服务器反代硬编码指向它，别改）。认证只用密钥（复用已有私钥，`-i` 指定路径），`BatchMode=yes` 拒绝密码交互；`StrictHostKeyChecking=yes`（预先录入 known_hosts，否则拒连——防中间人），**绝不放宽成 `accept-new`/`no`**。重连在 Node 内手写（退出 3s 重拨、不团灭），**不要引入 autossh**（零依赖约束）。ssh 进程非致命、frpc/cloudflared 致命：别把 ssh 的退出语义与 frpc/cf 的「退出=团灭」混同。
 8. **lan 局域网模式**：`mode:"lan"` 下网关绑 `0.0.0.0`（`DSH_GATE_BIND` 可覆盖），`start.mjs` 不启动任何隧道。明文 HTTP 是已接受的取舍（Android 丢完整 PWA + SW，iPhone 仍可 web clip；令牌可被同网嗅探）——**不要试图为 lan 加自签 HTTPS / 本地 CA**。防火墙是唯一网络边界：只提示用户放行「专用网络」，**程序不改系统防火墙**。仍不引入按 IP 的逻辑（约束 1 不因 lan 出现真实来源 IP 而破例）。
-9. **cf 模式（Cloudflare quick tunnel）**：`mode:"cf"` 下 `start.mjs` 拉起 `cf/cloudflared`（`--no-autoupdate tunnel --url http://127.0.0.1:3088`），无账号/域名/凭证。临时域名每次启动随机 → **登录链接必须由 start.mjs 抓 URL 后打印**（网关无从得知域名，别在 gateway.mjs 里瞎拼）。cloudflared 退出 = 域名失效 = **团灭**（重拨必换 URL，与 ssh 的「重拨入口不变」语义相反，勿混用）。CF 边缘不保证发 `X-Forwarded-Proto`，网关 cf 模式用 `FORCE_HTTPS` 强制 Cookie `Secure`——**勿删**。CF 免费层 100s 无响应硬超时（524）是产品限制，compact 类同步长命令会挂，属已知取舍。
+9. **cf 模式（Cloudflare quick tunnel）**：`mode:"cf"` 下 `start.mjs` 拉起 `cf/cloudflared`（`--no-autoupdate tunnel --url http://127.0.0.1:3088`），无账号/域名/凭证。临时域名每次启动随机 → **登录链接必须由 start.mjs 抓 URL 后打印**（网关无从得知域名，别在 gateway.mjs 里瞎拼）。cloudflared 退出 = 域名失效 = **团灭**（重拨必换 URL，与 ssh 的「重拨入口不变」语义相反，勿混用）。CF 边缘不保证发 `X-Forwarded-Proto`，网关 cf 模式用 `FORCE_HTTPS` 强制 Cookie `Secure`——**勿删**。CF 免费层 100s 无响应硬超时（524）是产品限制：网关 drip 保活（`DSH_GATE_DRIP_*`）在宽限期内抢先给首字节并周期滴包，预期可绕开（未经长期实机验证），若仍遇 524 属 CF 限制、勿在网关层硬怼。
 10. **控制面板（admin.mjs + admin/）**：**只绑 127.0.0.1**——面板是本机控制台，手机/局域网/公网都无权访问，这是产品决策而非缺陷，别加远程访问面板的口子。鉴权复用 config.json 网关令牌（`?t=` → `dg_admin` Cookie，HttpOnly + SameSite=Strict）；**所有 POST 必须校验 `X-DG-Admin` 自定义头**（防本机恶意网页 CSRF/localhost 扫描，跨站请求过不了 CORS 预检带不了自定义头）——该防线勿删。约束 1 不破例：面板不做任何按 remoteAddress 的请求判断，127.0.0.1 只是绑址。
 11. **config.json 是唯一配置数据源**：frp 参数也存 `config.json.frp`（serverAddr/serverPort/authToken），`frp/frpc.toml` 只是 `applyPanelConfig`/启动时全量重生成的产物——勿手动编辑、勿在代码里把它当数据源回读（迁移入口只有 `migrateFrpIntoConfig` 一处）。写 config.json 必须走 `saveConfigAtomic`（临时文件 + rename，防写一半留坏文件）。**面板保存 = 重启网关+隧道，dsh 不动**（重启 dsh 会杀掉正在跑的 agent 会话）；start.mjs 用进程代际（gen）区分「面板主动重启」与「意外崩溃」——旧进程的退出/重连回调随 gen 失效，不得触发团灭逻辑。
 
