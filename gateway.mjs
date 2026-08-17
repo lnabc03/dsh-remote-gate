@@ -1,4 +1,4 @@
-// dsh-mobile-mini — 最小化 DSH 移动端网关
+// dsh-remote-gate — 最小化 DSH 远程访问网关
 // 单文件、零依赖。只做三件事：
 //   1. 令牌认证（?t=<token> 首次登录 → HttpOnly Cookie）
 //   2. 反向代理到本机 DSH Web UI（含 WebSocket 隧道），头清洗后上游看到的永远是本机访问
@@ -202,17 +202,28 @@ const INJECT_SNIPPET =
   // 注册最小 SW：Android Chrome 的可安装性硬性条件；对页面行为零影响
   '<script>if("serviceWorker"in navigator){window.addEventListener("load",function(){navigator.serviceWorker.register("/pwa/sw.js",{scope:"/"}).catch(function(){})})}</script>'
 
+// crypto.randomUUID 仅在安全上下文（HTTPS 或 localhost）存在；lan 模式是明文 HTTP，
+// 浏览器不提供它，dsh 前端一调用（选工作区/改设置等）即抛 crypto.randomUUID is not a function。
+// 用 getRandomValues（HTTP 下可用）垫一个 RFC4122 v4 实现。仅绑 0.0.0.0（lan）时注入；
+// frp/ssh 走 HTTPS 安全上下文，原生就有，保持注入内容不变。
+const UUID_POLYFILL =
+  '<script>if(window.crypto&&!crypto.randomUUID){crypto.randomUUID=function(){' +
+  'var b=crypto.getRandomValues(new Uint8Array(16));b[6]=b[6]&15|64;b[8]=b[8]&63|128;' +
+  'for(var h="",i=0;i<16;i++)h+=(b[i]<16?"0":"")+b[i].toString(16);' +
+  'return h.slice(0,8)+"-"+h.slice(8,12)+"-"+h.slice(12,16)+"-"+h.slice(16,20)+"-"+h.slice(20)}}</script>'
+
 function injectHtml(html) {
   // 必须紧跟 <head> 之后：dsh 自带 <link rel="manifest">（无 PNG 图标，不满足
   // Chrome 安装条件），规范规定只认文档中第一个 manifest 链接，先到先得。
+  const snippet = (BIND_HOST === '0.0.0.0' ? UUID_POLYFILL : '') + INJECT_SNIPPET
   const open = /<head[^>]*>/i.exec(html)
   if (open) {
     const at = open.index + open[0].length
-    return html.slice(0, at) + INJECT_SNIPPET + html.slice(at)
+    return html.slice(0, at) + snippet + html.slice(at)
   }
   const close = /<\/head>/i.exec(html)
-  if (close) return html.slice(0, close.index) + INJECT_SNIPPET + html.slice(close.index)
-  return html + INJECT_SNIPPET
+  if (close) return html.slice(0, close.index) + snippet + html.slice(close.index)
+  return html + snippet
 }
 
 // ---- 反向代理 -------------------------------------------------------------------
@@ -325,15 +336,15 @@ server.on('upgrade', (req, socket, head) => {
 })
 
 server.listen(PORT, BIND_HOST, () => {
-  console.log(`[dsh-mobile-mini] listening on ${BIND_HOST}:${PORT} -> ${TARGET_HOST}:${TARGET_PORT}`)
-  console.log(`[dsh-mobile-mini] 首次登录链接（token 见 config.json）:`)
+  console.log(`listening on ${BIND_HOST}:${PORT} -> ${TARGET_HOST}:${TARGET_PORT}`)
+  console.log(`首次登录链接（token 见 config.json）:`)
   if (BIND_HOST === '0.0.0.0') {
     lanIp().then((ip) => {
-      console.log(`[dsh-mobile-mini]   http://${ip || '<本机局域网IP>'}:${PORT}/?t=${TOKEN}`)
+      console.log(`  http://${ip || '<本机局域网IP>'}:${PORT}/?t=${TOKEN}`)
       const alts = lanCandidates().filter((a) => a !== ip && !a.startsWith('169.254.'))
-      if (alts.length > 0) console.log(`[dsh-mobile-mini]   若打不开，把上面链接的 IP 换成候选之一再试: ${alts.join(' / ')}`)
+      if (alts.length > 0) console.log(`  若打不开，把上面链接的 IP 换成候选之一再试: ${alts.join(' / ')}`)
     })
   } else {
-    console.log(`[dsh-mobile-mini]   https://${DOMAIN || '<你的域名>'}/?t=${TOKEN}`)
+    console.log(`  https://${DOMAIN || '<你的域名>'}/?t=${TOKEN}`)
   }
 })

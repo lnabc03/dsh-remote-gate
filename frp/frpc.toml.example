@@ -16,7 +16,7 @@ transport.dialServerKeepalive = 7200
 transport.poolCount = 20
 
 [[proxies]]
-name = "dsh-mobile"
+name = "dsh-remote-gate"
 type = "tcp"
 localIP = "127.0.0.1"
 localPort = 3088

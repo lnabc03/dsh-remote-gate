@@ -41,7 +41,7 @@
 - 网关绑址按 `config.json.mode`（`DSH_GATE_BIND` 可覆盖）：frp/ssh → `127.0.0.1`（公网入口 = 服务器反代，TLS 终止 + `X-Forwarded-Proto: https` 决定 Cookie 是否 `Secure`），lan → `0.0.0.0`（局域网直连，HTTP 明文）。两种隧道都把服务器 `127.0.0.1:3088` 回灌到本机 gateway，反代侧无感知
 - **frp**：frps 端 `transport.maxPoolCount` 必须与 frpc 端 `transport.poolCount`（当前 20）对齐，否则刷 `work connection pool is full`（移动端加载 SPA 并发几十个连接所致）
 - **ssh**：服务器需 sshd + `AllowTcpForwarding yes`，无需 `GatewayPorts`（反向隧道默认只绑 loopback）；`remotePort` 固定 3088；私钥公钥需预先加入 `authorized_keys`，首次连接前先手动 `ssh` 一次录入 known_hosts。已实测基本可用（稳定性略逊于 frp、流式输出略卡，属预期）
-- **lan**：无需服务器/隧道/字段；`start.mjs` 跳过隧道分支；网关打印 `http://<局域网IP>:3088/?t=…`。IP 用 UDP connect 探测默认路由网卡得出（直接枚举第一个会踩中 VMware/Hyper-V 虚拟网卡，手机永远够不到——踩过），横幅附其余候选 IP 供手动替换。明文 + 防火墙提示已文档化；校园网/企业 Wi-Fi 常开 AP 客户端隔离导致同网设备互不可达（环境问题，开热点排除）
+- **lan**：无需服务器/隧道/字段；`start.mjs` 跳过隧道分支；网关打印 `http://<局域网IP>:3088/?t=…`。IP 用 UDP connect 探测默认路由网卡得出（直接枚举第一个会踩中 VMware/Hyper-V 虚拟网卡，手机永远够不到——踩过），横幅附其余候选 IP 供手动替换。明文 + 防火墙提示已文档化；校园网/企业 Wi-Fi 常开 AP 客户端隔离导致同网设备互不可达（环境问题，开热点排除）。明文 HTTP 是非安全上下文，浏览器不提供 `crypto.randomUUID`（dsh 前端选工作区/改设置会抛错），lan 模式注入 `getRandomValues` polyfill 解决——**勿删**，frp/ssh（HTTPS）不注入
 
 ## v2 待办（用户已明确推迟，别主动做）
 

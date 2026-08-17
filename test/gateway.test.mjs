@@ -1,4 +1,4 @@
-// dsh-mobile-mini 冒烟测试：起 mock 上游 + 网关子进程，验证认证、头清洗、HTML 注入、/pwa 资产
+// dsh-remote-gate 冒烟测试：起 mock 上游 + 网关子进程，验证认证、头清洗、HTML 注入、/pwa 资产
 import { test, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import http from 'node:http'
@@ -102,6 +102,8 @@ test('带 Cookie 访问 → 代理成功且注入 manifest', async () => {
   assert.ok(body.indexOf('/pwa/manifest.json') < body.indexOf('/manifest.webmanifest'),
     '注入的 manifest 链接必须出现在 dsh 自带 manifest 之前')
   assert.match(body, /<\/head><body>hello<\/body>/)
+  // 非 lan（127.0.0.1 / HTTPS 拓扑）不注入 randomUUID polyfill——安全上下文原生就有
+  assert.ok(!body.includes('randomUUID'), 'frp/ssh 模式不应注入 randomUUID polyfill')
 })
 
 test('上游看到的头：host 重写、无 x-forwarded-*、无 origin、无网关 Cookie', async () => {
@@ -175,6 +177,16 @@ test('lan 模式：网关绑 0.0.0.0 并打印局域网登录链接', async () =
     })
     assert.match(out, /listening on 0\.0\.0\.0:/)
     assert.match(out, /http:\/\//)
+
+    // lan 模式注入的 HTML 必须带 crypto.randomUUID polyfill
+    //（明文 HTTP 非安全上下文，浏览器原生没有它，dsh 前端会抛错）
+    const login = await fetch(`http://127.0.0.1:${lanPort}/?t=` + encodeURIComponent(TOKEN), { redirect: 'manual' })
+    const cookie = (login.headers.get('set-cookie') || '').split(';')[0]
+    const res = await fetch(`http://127.0.0.1:${lanPort}/`, { headers: { Cookie: cookie } })
+    assert.equal(res.status, 200)
+    const body = await res.text()
+    assert.match(body, /crypto\.randomUUID=function/)
+    assert.match(body, /getRandomValues/)
   } finally {
     try { gate.kill() } catch { }
     try { fs.unlinkSync(tmp) } catch { }

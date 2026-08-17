@@ -118,7 +118,7 @@ test('readFrpcConfig 解析真实格式 frpc.toml', () => {
     'transport.poolCount = 20',
     '',
     '[[proxies]]',
-    'name = "dsh-mobile"',
+    'name = "dsh-remote-gate"',
     'remotePort = 3088',
   ].join('\n')
   const parsed = readFrpcConfig(text)

@@ -67,7 +67,7 @@ http://<本机局域网IP>:3088/?t=<token>   # lan 模式
 - **iOS**：Safari 打开 → 分享 →「添加到主屏幕」
 - **Android**：用 Chrome/Edge 打开（厂商自带浏览器大多阉割了 PWA 安装），页面上点击几下并停留 30 秒以上（Chrome 的互动启发式硬条件），菜单 →「安装应用」
 - 已知限制：无 Google Play 服务的 ROM 上 Chrome 无法铸造 WebAPK，会退化为普通快捷方式
-- **lan 模式降级**：局域网是 HTTP 明文，浏览器不会注册 Service Worker、Android 无法安装为完整 PWA（退化为浏览器快捷方式）；iPhone 仍可「添加到主屏幕」成 web clip。完整 PWA 安装只在 frp/ssh 的 HTTPS 下可用
+- **lan 模式降级**：局域网是 HTTP 明文，浏览器不会注册 Service Worker、Android 无法安装为完整 PWA（退化为浏览器快捷方式）；iPhone 仍可「添加到主屏幕」成 web clip。完整 PWA 安装只在 frp/ssh 的 HTTPS 下可用。另：HTTP 非安全上下文下浏览器不提供 `crypto.randomUUID`，网关已在 lan 模式注入 polyfill（`getRandomValues` 实现），页面功能（选工作区/改设置等）不受影响
 
 ## 配置
 

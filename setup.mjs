@@ -138,7 +138,7 @@ export function readFrpcConfig(text) {
 
 export function renderFrpcToml({ serverAddr, serverPort, authToken }) {
   return [
-    '# frpc 配置 — dsh-mobile-mini 网关隧道',
+    '# frpc 配置 — dsh-remote-gate 网关隧道',
     '# 由 setup.mjs 生成（首次运行或 --setup）。本文件含 frps 认证 token，勿提交（已 gitignore）。',
     '',
     'serverAddr = ' + tomlString(serverAddr),
@@ -157,7 +157,7 @@ export function renderFrpcToml({ serverAddr, serverPort, authToken }) {
     'transport.poolCount = 20',
     '',
     '[[proxies]]',
-    'name = "dsh-mobile"',
+    'name = "dsh-remote-gate"',
     'type = "tcp"',
     'localIP = "127.0.0.1"',
     'localPort = 3088',
