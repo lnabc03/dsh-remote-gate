@@ -26,10 +26,15 @@ const MIME = {
   '.css': 'text/css; charset=utf-8',
   '.svg': 'image/svg+xml',
   '.png': 'image/png',
+  '.woff2': 'font/woff2',
 }
 
 // 允许服务的静态文件白名单（路径穿越防护之外的第二道：面板资产是闭集）
-const STATIC_FILES = new Set(['/index.html', '/app.js', '/style.css', '/vendor/qrcode.js'])
+const STATIC_FILES = new Set([
+  '/index.html', '/app.js', '/style.css',
+  '/vendor/qrcode.js', '/vendor/whale.svg',
+  '/vendor/fonts/inter-latin.woff2', '/vendor/fonts/jetbrains-mono-latin.woff2',
+])
 
 function tokenEq(a, b) {
   const ba = Buffer.from(String(a || ''))

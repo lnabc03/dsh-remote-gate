@@ -130,7 +130,7 @@ npm test   # 73 项：mock 上游 + 网关子进程冒烟、配置库、面板�
 | --- | --- |
 | `gateway.mjs` | 网关本体：令牌认证 + 反代 + WS 隧道 + manifest 注入 |
 | `start.mjs` / `start.bat` | 一键启动（控制面板 + dsh web + 网关 + frp/ssh/cf 隧道或 lan 直连，单窗口） |
-| `admin.mjs` + `admin/` | 本地控制面板：HTTP 服务（127.0.0.1 + 令牌 + 防 CSRF）与前端页面（vanilla JS，QR 库为 vendored MIT 单文件） |
+| `admin.mjs` + `admin/` | 本地控制面板：HTTP 服务（127.0.0.1 + 令牌 + 防 CSRF）与前端页面（vanilla JS；QR 库、Inter/JetBrains Mono 可变字体、鲸鱼图标均 vendored 于 `admin/vendor/`） |
 | `config-lib.mjs` | 配置库：config.json 读写（原子写）、面板表单校验、frpc.toml 迁移与生成、隧道二进制前置检查 |
 | `setup.mjs` | 纯函数库：字段校验、frpc.toml 渲染/解析、ssh 参数构造与连通性自检（交互式配置已由面板取代） |
 | `patch-dsh.mjs` | 幂等补丁 DSH client-runtime（修复提问弹窗被重连刷没） |

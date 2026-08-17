@@ -5,6 +5,12 @@ const $ = (sel) => document.querySelector(sel)
 const $$ = (sel) => Array.from(document.querySelectorAll(sel))
 
 const MODE_NAMES = { frp: 'frp', ssh: 'ssh', lan: 'lan', cf: 'cf' }
+const MODE_DESCS = {
+  frp: '自有服务器中转，稳定（推荐有服务器时使用）',
+  ssh: '复用服务器 sshd，免装 frps，断线自动重拨',
+  lan: '同一局域网直连，零配置，明文 HTTP',
+  cf: 'Cloudflare 临时隧道，零服务器，域名每次随机',
+}
 
 // ---- API 封装 ------------------------------------------------------------------
 async function api(path, opts = {}) {
@@ -66,7 +72,7 @@ function renderQr(text) {
     qr.addData(text)
     qr.make()
     const n = qr.getModuleCount()
-    const scale = Math.max(2, Math.floor(232 / (n + 8)))
+    const scale = Math.max(2, Math.floor(200 / (n + 8)))
     const size = (n + 8) * scale
     canvas.width = size
     canvas.height = size
@@ -120,6 +126,7 @@ function syncModeSections() {
   $('#fsDomain').classList.toggle('hidden', mode !== 'frp' && mode !== 'ssh')
   $('#noteLan').classList.toggle('hidden', mode !== 'lan')
   $('#noteCf').classList.toggle('hidden', mode !== 'cf')
+  $('#modeDesc').textContent = MODE_DESCS[mode] || ''
 }
 
 function collectPayload() {
@@ -197,8 +204,23 @@ function rotateToken() {
 }
 
 // ---- 操作按钮 ----------------------------------------------------------------------
+// 内联二次确认：首次点击按钮变红进入 armed 态，3s 内再点才执行；超时自动恢复
+let restartArmTimer = null
 async function restartDsh() {
-  if (!confirm('重启 dsh 会中断其中正在运行的 agent 会话，确定继续？')) return
+  const btn = $('#restartDshBtn')
+  if (!btn.classList.contains('armed')) {
+    btn.classList.add('armed')
+    btn.textContent = '确认重启 dsh？'
+    clearTimeout(restartArmTimer)
+    restartArmTimer = setTimeout(() => {
+      btn.classList.remove('armed')
+      btn.textContent = '重启 dsh'
+    }, 3000)
+    return
+  }
+  clearTimeout(restartArmTimer)
+  btn.classList.remove('armed')
+  btn.textContent = '重启 dsh'
   const r = await api('/api/restart-dsh', { method: 'POST', body: '{}' })
   if (!r.ok) alert(r.error || '重启失败')
 }

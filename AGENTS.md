@@ -4,7 +4,7 @@
 
 ## 技术栈与形态
 
-- 纯 Node ≥ 18，**零运行时依赖**，全部用 node: 内置模块——不要引入 npm 依赖（面板前端的 QR 库是 vendored 单文件 MIT 资产 `admin/vendor/qrcode.js`，不是 npm 依赖，别换成包）
+- 纯 Node ≥ 18，**零运行时依赖**，全部用 node: 内置模块——不要引入 npm 依赖（面板前端的 QR 库、Inter/JetBrains Mono 可变字体、鲸鱼图标是 vendored 资产 `admin/vendor/`，不是 npm 依赖，别换成包或 CDN 链接）
 - `gateway.mjs` 是网关服务进程（ESM 单文件，保持自包含、不 import 本仓库其他文件）；`start.mjs` 是进程编排器 + 控制面板宿主；面板服务拆在 `admin.mjs`，配置读写在 `config-lib.mjs`，校验纯函数在 `setup.mjs`
 - 测试：`npm test`（node:test + 起 mock 上游和网关子进程，端口随机化防冲突）
 - Windows 为主要运行平台；`.bat` 文件**必须是纯 ASCII**（cmd 用 GBK 解析，UTF-8 中文会被当成乱码命令执行——踩过）
