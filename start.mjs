@@ -93,6 +93,22 @@ function killTree(p) {
   }
 }
 
+// 进程仍存活判定。p.killed 不能用于此——kill() 一调用它就为 true，但进程可能还没死。
+const alive = (p) => !!p && p.exitCode === null && p.signalCode === null
+
+// 等子进程真正退出（带超时兜底）。
+// 面板热重启必须先等旧进程释放监听端口（网关 3088 / dsh 3080）再拉新进程：
+// killTree 在 Windows 走异步 taskkill，一发出就返回；若立即 spawn 新进程，
+// 新进程 EADDRINUSE 秒退，命中 exit 回调被误判为「意外崩溃」→ 团灭（踩过）。
+function waitExit(p, timeoutMs = 3000) {
+  return new Promise((resolve) => {
+    if (!alive(p)) return resolve()
+    const t = setTimeout(() => resolve(), timeoutMs)
+    t.unref?.()
+    p.once('exit', () => { clearTimeout(t); resolve() })
+  })
+}
+
 function shutdown(code = 0) {
   if (shuttingDown) return
   shuttingDown = true
@@ -188,13 +204,16 @@ function startDsh() {
 }
 
 // 面板「重启 dsh」：只能重启本启动器拉起的 dsh；外部已运行的 dsh 不归我们管
-function restartDshAction() {
+async function restartDshAction() {
   if (state.dsh.external || !state.dsh.proc) {
     return { ok: false, error: '当前 3080 上的 dsh 不是本启动器拉起的，无法代为重启；请手动重启后重新运行 npm start' }
   }
   say('start', '面板请求重启 dsh web（进行中的 agent 会话会中断）')
   state.dsh.gen++ // 旧进程退出回调失效，不触发自动重启计数
-  if (procRunning(state.dsh.proc)) killTree(state.dsh.proc)
+  if (alive(state.dsh.proc)) {
+    killTree(state.dsh.proc)
+    await waitExit(state.dsh.proc) // 等 3080 释放再拉新，避免新 dsh EADDRINUSE 白耗一次重试
+  }
   state.dsh.retriesLeft = 5
   startDsh()
   return { ok: true }
@@ -221,10 +240,14 @@ function startGate() {
   state.panel?.broadcastStatus()
 }
 
-function stopGate() {
+async function stopGate() {
   state.gate.gen++ // 使旧进程的退出回调失效（不触发团灭）
-  if (procRunning(state.gate.proc)) killTree(state.gate.proc)
+  const p = state.gate.proc
   state.gate.proc = null
+  if (alive(p)) {
+    killTree(p)
+    await waitExit(p) // 等 3088 释放：新网关立即 bind 会 EADDRINUSE 秒退 → 误判团灭
+  }
 }
 
 // ---- 隧道 ---------------------------------------------------------------------------
@@ -270,11 +293,15 @@ function startTunnel(cfg) {
   state.panel?.broadcastStatus()
 }
 
-function stopTunnel() {
+async function stopTunnel() {
   state.tunnel.gen++
-  if (procRunning(state.tunnel.proc)) killTree(state.tunnel.proc)
+  const p = state.tunnel.proc
   state.tunnel.proc = null
   state.tunnel.tag = null
+  if (alive(p)) {
+    killTree(p)
+    await waitExit(p)
+  }
 }
 
 // ssh 反向隧道：非致命进程，退出后 3s 自动重拨；连续快速失败给提示但不团灭。
@@ -443,8 +470,7 @@ const actions = {
     applyPanelConfig(config)
     state.cfg = config
     say('start', `配置已保存（模式: ${config.mode}），重启网关与隧道…`)
-    stopTunnel()
-    stopGate()
+    await Promise.all([stopTunnel(), stopGate()]) // 等旧进程退出释放端口，再拉新进程
     startGate()
     startTunnel(config)
     // ssh 模式：保存后异步跑一次连通性自检，结果只进日志不阻塞保存
@@ -599,4 +625,4 @@ if (isMain) {
   main()
 }
 
-export { shouldIgnoreLine, FRPC_IGNORE, CF_IGNORE, CF_IGNORE_RE, extractCfUrl }
+export { shouldIgnoreLine, FRPC_IGNORE, CF_IGNORE, CF_IGNORE_RE, extractCfUrl, waitExit }

@@ -28,7 +28,7 @@
 | 路径 | 职责 | 改动注意 |
 | --- | --- | --- |
 | `gateway.mjs` | 令牌认证 + 反代 + WS 隧道 + manifest 注入 + 流量统计（每小时一行 ↓↑ 字节 + 下行 top3 路径热点榜，静默时段不刷） | 改完必跑 `npm test`；下行口径 = 写回浏览器侧字节（post-gzip，即过隧道计费口径），勿改回上游侧计数；保持单文件自包含 |
-| `start.mjs` | 进程编排 + 面板宿主：拉起面板/dsh/网关/隧道，单窗口日志加前缀 | dsh 崩溃自动重启（5 次×3s）；网关/frpc/cloudflared **意外**退出团灭，ssh 退出 3s 重拨（约束 7）；面板保存触发的重启靠 gen 代际区分，别绕过 stopGate/stopTunnel 直接 kill；cf 临时域名由 startCfProc 抓日志（`extractCfUrl`）→ 拼令牌打印 + 推面板；dsh 直接 spawn node bin.js（约束 6），杀派生树用 `taskkill /T`；`--no-ui` 关闭面板 |
+| `start.mjs` | 进程编排 + 面板宿主：拉起面板/dsh/网关/隧道，单窗口日志加前缀 | dsh 崩溃自动重启（5 次×3s）；网关/frpc/cloudflared **意外**退出团灭，ssh 退出 3s 重拨（约束 7）；面板保存触发的重启靠 gen 代际区分，别绕过 stopGate/stopTunnel 直接 kill；**热重启必须 await `waitExit` 等旧进程退出释放端口再拉新**——killTree 是异步的（Windows 走 taskkill），立即 spawn 新网关会 EADDRINUSE 秒退，被 exit 回调误判为意外崩溃 → 团灭（踩过）；cf 临时域名由 startCfProc 抓日志（`extractCfUrl`）→ 拼令牌打印 + 推面板；dsh 直接 spawn node bin.js（约束 6），杀派生树用 `taskkill /T`；`--no-ui` 关闭面板 |
 | `admin.mjs` + `admin/` | 本地控制面板：HTTP 服务（认证/CSRF/SSE 日志流）+ 前端（vanilla JS） | 约束 10；静态文件白名单 `STATIC_FILES` 闭集，加新文件要同步登记；前端 CSP `default-src 'self'`，别引入内联脚本/外部 CDN；令牌轮换后 POST 响应须 Set-Cookie 换新（否则面板把自己锁外面） |
 | `config-lib.mjs` | config.json 读写（`saveConfigAtomic`）、面板表单校验（`validatePanelConfig`）、frpc.toml 迁移与生成、`isConfigured`/`preflightForMode` | 约束 11；表单空串语义 = 「未改动」回退 existing（`pick` 助手），别用 `??` 挡空串——踩过 |
 | `setup.mjs` | 纯函数库：字段校验、frpc.toml 渲染/解析、ssh 参数构造与连通性自检 | 交互式配置已删除（面板取代），勿再加 readline 提问；改校验/渲染/ssh 参数必跑 `npm test` |

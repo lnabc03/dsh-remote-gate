@@ -1,7 +1,8 @@
 // start.mjs 导出的日志过滤纯函数单测（导入安全：main 由 isMain 守卫）
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { shouldIgnoreLine, FRPC_IGNORE, CF_IGNORE, CF_IGNORE_RE, extractCfUrl } from '../start.mjs'
+import { spawn } from 'node:child_process'
+import { shouldIgnoreLine, FRPC_IGNORE, CF_IGNORE, CF_IGNORE_RE, extractCfUrl, waitExit } from '../start.mjs'
 
 test('shouldIgnoreLine：frpc 的 pool-full 告警被过滤', () => {
   const noisy = '2026-08-17 00:38:19 [E] [client/control.go:153] StartWorkConn contains error: work connection pool is full, discarding'
@@ -73,4 +74,47 @@ test('CF_IGNORE / CF_IGNORE_RE 形状', () => {
   assert.ok(CF_IGNORE.length > 0)
   assert.ok(CF_IGNORE.every((n) => typeof n === 'string'))
   assert.ok(CF_IGNORE_RE instanceof RegExp)
+})
+
+// waitExit：面板热重启「先等旧进程退出再拉新」的核心原语。
+// 回归：旧实现 stopGate 杀完立刻 startGate，新网关 EADDRINUSE 秒退被误判团灭。
+test('waitExit：被杀进程退出后 resolve', async () => {
+  const p = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30000)'], { windowsHide: true })
+  try {
+    await new Promise((resolve, reject) => {
+      p.once('spawn', resolve)
+      p.once('error', reject)
+    })
+    p.kill()
+    const t0 = Date.now()
+    await waitExit(p, 5000)
+    assert.ok(p.exitCode !== null || p.signalCode !== null, '进程应已退出')
+    assert.ok(Date.now() - t0 < 5000, '应在超时前随 exit 事件返回')
+  } finally {
+    if (p.exitCode === null && p.signalCode === null) p.kill('SIGKILL')
+  }
+})
+
+test('waitExit：已退出的进程立即 resolve，不挂起', async () => {
+  const p = spawn(process.execPath, ['-e', 'process.exit(0)'], { windowsHide: true })
+  await new Promise((resolve) => p.once('exit', resolve))
+  const t0 = Date.now()
+  await waitExit(p, 3000)
+  assert.ok(Date.now() - t0 < 1000, '已死进程不应等到超时')
+})
+
+test('waitExit：进程不退出时按超时兜底 resolve', async () => {
+  const p = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30000)'], { windowsHide: true })
+  try {
+    await new Promise((resolve, reject) => {
+      p.once('spawn', resolve)
+      p.once('error', reject)
+    })
+    const t0 = Date.now()
+    await waitExit(p, 200)
+    assert.ok(Date.now() - t0 >= 150, '应等待到超时')
+    assert.equal(p.exitCode, null, '超时兜底不杀进程')
+  } finally {
+    p.kill('SIGKILL')
+  }
 })
