@@ -3,7 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>DSH Gate 控制面板</title>
+<meta name="color-scheme" content="dark">
+<title>DSH Remote Gate 控制面板</title>
 <link rel="icon" href="/vendor/whale.svg" type="image/svg+xml">
 <link rel="stylesheet" href="/style.css">
 </head>
@@ -12,13 +13,13 @@
 <header class="topbar">
   <div class="brand">
     <img src="/vendor/whale.svg" alt="" class="brand-logo">
-    <span class="brand-name">DSH Gate</span>
+    <span class="brand-name">DSH Remote Gate</span>
     <span class="brand-sub">控制面板</span>
   </div>
   <span id="modeBadge" class="badge">…</span>
   <div class="lights">
-    <span class="light" id="lightDsh" title="dsh web (3080)"><i></i>dsh</span>
-    <span class="light" id="lightGate" title="网关 (3088)"><i></i>网关</span>
+    <span class="light" id="lightDsh" title="dsh web · 端口 3080"><i></i>dsh</span>
+    <span class="light" id="lightGate" title="网关 · 端口 3088"><i></i>网关</span>
     <span class="light" id="lightTunnel" title="隧道"><i></i>隧道</span>
   </div>
 </header>
@@ -41,10 +42,10 @@
     <section class="pane" id="opsCard">
       <h2>操作</h2>
       <div class="ops-col">
-        <button id="openDshBtn" type="button" class="btn">打开 DSH 本机页面</button>
+        <button id="openDshBtn" type="button" class="btn">打开 DSH 页面</button>
         <button id="restartDshBtn" type="button" class="btn danger">重启 dsh</button>
       </div>
-      <p class="muted">重启 dsh 会中断正在运行的 agent 会话（用于补丁生效等场景）。</p>
+      <p class="muted">重启 dsh 会中断正在运行的 agent 会话。</p>
     </section>
   </aside>
 
@@ -86,12 +87,12 @@
 
       <fieldset id="fsDomain" class="hidden">
         <legend>公网入口</legend>
-        <div class="field"><label>公网域名<input name="domain" autocomplete="off" placeholder="如 dsh.example.com（反代指向 127.0.0.1:3088）"></label>
+        <div class="field"><label>公网域名<input name="domain" autocomplete="off" placeholder="如 dsh.example.com，反代指向 127.0.0.1:3088"></label>
         <p class="field-err" data-err="domain"></p></div>
       </fieldset>
 
-      <p class="mode-note hidden" id="noteLan">lan 模式：网关绑 0.0.0.0，同网设备直接访问；明文 HTTP，仅建议可信网络。首次启动若弹防火墙提示请点「允许」。</p>
-      <p class="mode-note hidden" id="noteCf">cf 模式：cloudflared 每次启动分配随机临时域名，重启即换；PWA 不建议安装。100s 无响应会被 CF 切断（524），compact 类超长命令请换 frp/ssh。</p>
+      <p class="mode-note hidden" id="noteLan">lan 模式：网关绑 0.0.0.0，同网设备直接访问。明文 HTTP，仅建议可信网络。首次启动若弹防火墙提示请点「允许」。</p>
+      <p class="mode-note hidden" id="noteCf">cf 模式：域名每次启动随机分配，重启即换。100s 无响应会被 CF 切断，超长命令请换 frp 或 ssh。</p>
 
       <fieldset>
         <legend>网关令牌</legend>
@@ -100,14 +101,14 @@
           <button id="rotateBtn" type="button" class="btn small">重新生成</button>
         </div>
         <p class="field-err" data-err="token"></p>
-        <p class="muted">轮换后所有旧登录态（含手机端 Cookie）立即失效，需用新链接重新登录。</p>
+        <p class="muted">轮换后所有旧登录态立即失效，需用新链接重新登录。</p>
       </fieldset>
 
       <div class="form-actions">
         <button id="saveBtn" type="submit" class="btn primary">保存并重启网关+隧道</button>
         <span id="saveMsg" class="save-msg"></span>
       </div>
-      <p class="muted">保存只重启网关与隧道（约 2–3 秒），dsh 及其中正在运行的 agent 会话不受影响。</p>
+      <p class="muted">保存只重启网关与隧道，dsh 会话不受影响。</p>
     </form>
   </section>
 

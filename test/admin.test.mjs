@@ -152,3 +152,22 @@ test('SSE /api/logs：回放缓冲日志并推送新日志', async () => {
   await readUntil('event: status')
   await reader.cancel()
 })
+
+test('日志剥离 ANSI 颜色转义（frpc/cloudflared 输出带色码，面板是纯文本渲染）', async () => {
+  panel.log('frpc', '\x1b[0m\x1b[1;34m2026-08-17 17:18:33 [I] start proxy success\x1b[0m')
+  const cookie = await loginCookie()
+  const res = await fetch(base() + '/api/logs', { headers: { Cookie: cookie } })
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder()
+  let buf = ''
+  for (let i = 0; i < 50 && !buf.includes('start proxy success'); i++) {
+    const { value, done } = await reader.read()
+    if (done) break
+    buf += decoder.decode(value, { stream: true })
+  }
+  await reader.cancel()
+  assert.ok(buf.includes('start proxy success'), '应收到日志行')
+  assert.ok(!buf.includes('\x1b'), '不得残留 ESC 控制符')
+  assert.ok(!buf.includes('[1;34m'), '不得残留 SGR 序列文本')
+  assert.ok(buf.includes('[I]'), '正常方括号内容应保留')
+})

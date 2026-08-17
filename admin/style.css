@@ -20,6 +20,7 @@
 }
 
 :root {
+  color-scheme: dark; /* 根元素底色/滚动条跟随暗色，消除浅色 UA 残留 */
   --bg: #0b0c0f;
   --bg-inset: #07080b;        /* 输入框 / 日志底板 */
   --border-strong: #2b303c;   /* 区块边界：header、栏间 */
@@ -45,6 +46,8 @@
 * { box-sizing: border-box; }
 
 html, body { height: 100%; }
+
+html { background: var(--bg); } /* body 100dvh 取整差露出根元素浅色底（细白线根因之一） */
 
 body {
   margin: 0;
@@ -161,6 +164,7 @@ h2 {
 .qr-wrap { margin-top: 12px; }
 #qrCanvas {
   display: block;
+  margin: 0 auto; /* 栏内居中 */
   background: #fff;
   padding: 8px;
   image-rendering: pixelated;

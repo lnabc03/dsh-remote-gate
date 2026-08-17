@@ -63,13 +63,17 @@ function queryTicket(url) {
 }
 
 const UNAUTH_PAGE = '<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">' +
-  '<meta name="viewport" content="width=device-width,initial-scale=1"><title>未授权</title>' +
+  '<meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="dark"><title>未授权</title>' +
   '<style>body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;' +
-  'background:#0f1115;color:#e6e6e6;font:16px/1.6 system-ui,sans-serif}' +
-  '.card{max-width:22rem;padding:2rem;text-align:center}.muted{color:#8b8f98;font-size:.9em}</style>' +
-  '</head><body><div class="card"><h2>🔒 DSH Gate 控制面板</h2>' +
+  'background:#0b0c0f;color:#e7e9ee;font:16px/1.6 system-ui,sans-serif}' +
+  '.card{max-width:22rem;padding:2rem;text-align:center}.muted{color:#9aa1ad;font-size:.9em}</style>' +
+  '</head><body><div class="card"><h2>DSH Remote Gate 控制面板</h2>' +
   '<p class="muted">面板仅能从本机启动器打开。<br>若令牌已轮换，请回到启动器窗口复制新链接，或重新运行 <code>npm start</code>。</p>' +
   '</div></body></html>'
+
+// 子进程输出常带 ANSI 颜色转义（frpc/cloudflared），面板日志是纯文本，进缓冲前剥掉
+// eslint-disable-next-line no-control-regex
+const ANSI_RE = /\x1b(?:\[[0-9;?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\))/g
 
 // actions: { getStatus(), getConfig(), saveConfig(payload), restartDsh() }
 // getToken: 函数而非定值——令牌轮换后面板用新令牌继续鉴权
@@ -88,9 +92,9 @@ export function startPanel({ getToken, actions, preferredPort = 3089 }) {
     port: 0,
     url: '',
     server: null,
-    // start.mjs 的每条日志经此进环形缓冲 + SSE
+    // start.mjs 的每条日志经此进环形缓冲 + SSE（剥 ANSI 转义，面板是纯文本渲染）
     log(tag, line) {
-      const entry = { tag, line, ts: Date.now() }
+      const entry = { tag, line: String(line).replace(ANSI_RE, ''), ts: Date.now() }
       logBuffer.push(entry)
       if (logBuffer.length > LOG_BUFFER_MAX) logBuffer.shift()
       broadcast('log', entry)

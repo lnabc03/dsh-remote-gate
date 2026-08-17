@@ -1,4 +1,4 @@
-// DSH Gate 控制面板前端：状态灯 / 登录链接+二维码 / 配置表单 / SSE 日志流
+// DSH Remote Gate 控制面板前端：状态灯 / 登录链接+二维码 / 配置表单 / SSE 日志流
 // 纯 vanilla JS（零依赖），QR 用 vendor/qrcode.js（qrcode-generator, MIT）
 
 const $ = (sel) => document.querySelector(sel)
@@ -6,7 +6,7 @@ const $$ = (sel) => Array.from(document.querySelectorAll(sel))
 
 const MODE_NAMES = { frp: 'frp', ssh: 'ssh', lan: 'lan', cf: 'cf' }
 const MODE_DESCS = {
-  frp: '自有服务器中转，稳定（推荐有服务器时使用）',
+  frp: '自有服务器中转，稳定，有服务器时首选',
   ssh: '复用服务器 sshd，免装 frps，断线自动重拨',
   lan: '同一局域网直连，零配置，明文 HTTP',
   cf: 'Cloudflare 临时隧道，零服务器，域名每次随机',
@@ -18,7 +18,7 @@ async function api(path, opts = {}) {
     ...opts,
     headers: { 'X-DG-Admin': '1', ...(opts.body ? { 'Content-Type': 'application/json' } : {}) },
   })
-  return res.json().catch(() => ({ ok: false, errors: { _: '响应不是合法 JSON（HTTP ' + res.status + '）' } }))
+  return res.json().catch(() => ({ ok: false, errors: { _: '响应不是合法 JSON，HTTP ' + res.status } }))
 }
 
 // ---- 状态灯 + 登录链接 + 二维码 -----------------------------------------------------
@@ -38,20 +38,20 @@ function renderStatus(s) {
   setLight('#lightGate', s.procs.gate.running ? 'on' : 'off')
   const tunnelLight = !s.configured || (s.mode === 'lan') ? 'na' : (s.procs.tunnel.running ? 'on' : 'off')
   setLight('#lightTunnel', tunnelLight)
-  $('#lightTunnel').title = '隧道' + (s.procs.tunnel.tag ? `（${s.procs.tunnel.tag}）` : s.mode === 'lan' ? '（lan 无隧道）' : '')
+  $('#lightTunnel').title = '隧道' + (s.procs.tunnel.tag ? ` · ${s.procs.tunnel.tag}` : s.mode === 'lan' ? ' · lan 无隧道' : '')
 
   const hint = $('#loginHint')
   const row = $('#loginRow')
   const canvas = $('#qrCanvas')
   if (s.login) {
-    hint.textContent = '手机扫码或点开链接即可登录（链接内含令牌，勿外发）：'
+    hint.textContent = '手机扫码或点开链接即可登录。链接内含令牌，勿外发。'
     const a = $('#loginLink')
     a.textContent = s.login
     a.href = s.login
     row.classList.remove('hidden')
     renderQr(s.login)
   } else if (!s.configured) {
-    hint.textContent = '尚未配置访问模式，请先在下方完成配置。'
+    hint.textContent = '尚未配置访问模式，请先完成配置并保存。'
     row.classList.add('hidden')
     canvas.classList.add('hidden')
   } else if (s.cfPending) {
@@ -59,7 +59,7 @@ function renderStatus(s) {
     row.classList.add('hidden')
     canvas.classList.add('hidden')
   } else {
-    hint.textContent = '登录链接暂不可用（网关/隧道未运行）。'
+    hint.textContent = '登录链接暂不可用：网关或隧道未运行。'
     row.classList.add('hidden')
     canvas.classList.add('hidden')
   }
