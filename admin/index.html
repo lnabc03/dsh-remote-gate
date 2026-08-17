@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>DSH Gate 控制面板</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header class="topbar">
+  <h1>🐳 DSH Gate 控制面板</h1>
+  <span id="modeBadge" class="badge">…</span>
+  <div class="lights">
+    <span class="light" id="lightDsh" title="dsh web (3080)"><i></i>dsh</span>
+    <span class="light" id="lightGate" title="网关 (3088)"><i></i>网关</span>
+    <span class="light" id="lightTunnel" title="隧道"><i></i>隧道</span>
+  </div>
+</header>
+
+<main>
+  <section class="card" id="loginCard">
+    <h2>登录链接</h2>
+    <div id="loginBody">
+      <p class="muted" id="loginHint">加载中…</p>
+      <div id="loginRow" class="hidden">
+        <a id="loginLink" href="#" target="_blank" rel="noopener" class="login-link"></a>
+        <button id="copyBtn" type="button" class="btn small">复制</button>
+      </div>
+      <div class="qr-wrap">
+        <canvas id="qrCanvas" width="232" height="232" class="hidden"></canvas>
+      </div>
+    </div>
+  </section>
+
+  <section class="card" id="configCard">
+    <h2>访问配置</h2>
+    <form id="configForm" novalidate>
+      <div class="modes" role="radiogroup" aria-label="访问模式">
+        <label class="mode-opt"><input type="radio" name="mode" value="frp">
+          <span class="mode-name">frp</span><span class="mode-desc">自有服务器中转，稳定（推荐有服务器时使用）</span></label>
+        <label class="mode-opt"><input type="radio" name="mode" value="ssh">
+          <span class="mode-name">ssh</span><span class="mode-desc">复用服务器 sshd，免装 frps，断线自动重拨</span></label>
+        <label class="mode-opt"><input type="radio" name="mode" value="lan">
+          <span class="mode-name">lan</span><span class="mode-desc">同一局域网直连，零配置，明文 HTTP</span></label>
+        <label class="mode-opt"><input type="radio" name="mode" value="cf">
+          <span class="mode-name">cf</span><span class="mode-desc">Cloudflare 临时隧道，零服务器，域名每次随机</span></label>
+      </div>
+      <p class="field-err" data-err="mode"></p>
+
+      <fieldset id="fsFrp" class="hidden">
+        <legend>frp 服务器</legend>
+        <label>服务器地址<input name="frp.serverAddr" autocomplete="off" placeholder="如 203.0.113.10"></label>
+        <p class="field-err" data-err="frp.serverAddr"></p>
+        <label>服务器端口<input name="frp.serverPort" inputmode="numeric" placeholder="7000"></label>
+        <p class="field-err" data-err="frp.serverPort"></p>
+        <label>frps 认证 token<input name="frp.authToken" autocomplete="off" placeholder="frps.toml 里的 auth.token"></label>
+        <p class="field-err" data-err="frp.authToken"></p>
+      </fieldset>
+
+      <fieldset id="fsSsh" class="hidden">
+        <legend>SSH 服务器</legend>
+        <label>服务器地址<input name="ssh.host" autocomplete="off" placeholder="如 203.0.113.10"></label>
+        <p class="field-err" data-err="ssh.host"></p>
+        <label>端口<input name="ssh.port" inputmode="numeric" placeholder="22"></label>
+        <p class="field-err" data-err="ssh.port"></p>
+        <label>用户名<input name="ssh.user" autocomplete="off"></label>
+        <p class="field-err" data-err="ssh.user"></p>
+        <label>私钥路径<input name="ssh.keyPath" autocomplete="off" placeholder="~/.ssh/id_ed25519"></label>
+        <p class="field-err" data-err="ssh.keyPath"></p>
+      </fieldset>
+
+      <fieldset id="fsDomain" class="hidden">
+        <legend>公网入口</legend>
+        <label>公网域名<input name="domain" autocomplete="off" placeholder="如 dsh.example.com（服务器反代指向 127.0.0.1:3088）"></label>
+        <p class="field-err" data-err="domain"></p>
+      </fieldset>
+
+      <p class="muted mode-note hidden" id="noteLan">lan 模式：网关绑 0.0.0.0，同网设备直接访问；明文 HTTP，仅建议可信网络。首次启动若弹防火墙提示请点「允许」。</p>
+      <p class="muted mode-note hidden" id="noteCf">cf 模式：cloudflared 每次启动分配随机临时域名，重启即换；PWA 不建议安装。100s 无响应会被 CF 切断（524），compact 类超长命令请换 frp/ssh。</p>
+
+      <fieldset>
+        <legend>网关令牌</legend>
+        <label>访问令牌<input name="token" autocomplete="off" placeholder="留空则不修改"></label>
+        <p class="field-err" data-err="token"></p>
+        <button id="rotateBtn" type="button" class="btn small">重新生成令牌</button>
+        <p class="muted">轮换后所有旧登录态（含手机端 Cookie）立即失效，需用新链接重新登录。</p>
+      </fieldset>
+
+      <div class="form-actions">
+        <button id="saveBtn" type="submit" class="btn primary">保存并重启网关+隧道</button>
+        <span id="saveMsg" class="save-msg"></span>
+      </div>
+      <p class="muted">保存只重启网关与隧道（约 2–3 秒），dsh 及其中正在运行的 agent 会话不受影响。</p>
+    </form>
+  </section>
+
+  <section class="card" id="opsCard">
+    <h2>操作</h2>
+    <div class="ops-row">
+      <button id="restartDshBtn" type="button" class="btn">重启 dsh</button>
+      <button id="openDshBtn" type="button" class="btn">打开 DSH 本机页面</button>
+    </div>
+    <p class="muted">重启 dsh 会中断其中正在运行的 agent 会话（用于补丁生效等场景），按钮有二次确认。</p>
+  </section>
+
+  <section class="card" id="logCard">
+    <h2>运行日志</h2>
+    <pre id="logPane" class="log-pane"></pre>
+  </section>
+</main>
+
+<script src="/vendor/qrcode.js"></script>
+<script src="/app.js"></script>
+</body>
+</html>

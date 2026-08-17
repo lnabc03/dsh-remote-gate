@@ -4,8 +4,8 @@
 
 ## 技术栈与形态
 
-- 纯 Node ≥ 18，**零运行时依赖**，全部用 node: 内置模块——不要引入 npm 依赖
-- `gateway.mjs` 是唯一服务进程（ESM 单文件）；`start.mjs` 是进程编排器
+- 纯 Node ≥ 18，**零运行时依赖**，全部用 node: 内置模块——不要引入 npm 依赖（面板前端的 QR 库是 vendored 单文件 MIT 资产 `admin/vendor/qrcode.js`，不是 npm 依赖，别换成包）
+- `gateway.mjs` 是网关服务进程（ESM 单文件，保持自包含、不 import 本仓库其他文件）；`start.mjs` 是进程编排器 + 控制面板宿主；面板服务拆在 `admin.mjs`，配置读写在 `config-lib.mjs`，校验纯函数在 `setup.mjs`
 - 测试：`npm test`（node:test + 起 mock 上游和网关子进程，端口随机化防冲突）
 - Windows 为主要运行平台；`.bat` 文件**必须是纯 ASCII**（cmd 用 GBK 解析，UTF-8 中文会被当成乱码命令执行——踩过）
 
@@ -20,18 +20,22 @@
 7. **ssh 反向隧道**：`ssh -R 3088:127.0.0.1:3088`，`remotePort` 固定 3088（服务器反代硬编码指向它，别改）。认证只用密钥（复用已有私钥，`-i` 指定路径），`BatchMode=yes` 拒绝密码交互；`StrictHostKeyChecking=yes`（预先录入 known_hosts，否则拒连——防中间人），**绝不放宽成 `accept-new`/`no`**。重连在 Node 内手写（退出 3s 重拨、不团灭），**不要引入 autossh**（零依赖约束）。ssh 进程非致命、frpc/cloudflared 致命：别把 ssh 的退出语义与 frpc/cf 的「退出=团灭」混同。
 8. **lan 局域网模式**：`mode:"lan"` 下网关绑 `0.0.0.0`（`DSH_GATE_BIND` 可覆盖），`start.mjs` 不启动任何隧道。明文 HTTP 是已接受的取舍（Android 丢完整 PWA + SW，iPhone 仍可 web clip；令牌可被同网嗅探）——**不要试图为 lan 加自签 HTTPS / 本地 CA**。防火墙是唯一网络边界：只提示用户放行「专用网络」，**程序不改系统防火墙**。仍不引入按 IP 的逻辑（约束 1 不因 lan 出现真实来源 IP 而破例）。
 9. **cf 模式（Cloudflare quick tunnel）**：`mode:"cf"` 下 `start.mjs` 拉起 `cf/cloudflared`（`--no-autoupdate tunnel --url http://127.0.0.1:3088`），无账号/域名/凭证。临时域名每次启动随机 → **登录链接必须由 start.mjs 抓 URL 后打印**（网关无从得知域名，别在 gateway.mjs 里瞎拼）。cloudflared 退出 = 域名失效 = **团灭**（重拨必换 URL，与 ssh 的「重拨入口不变」语义相反，勿混用）。CF 边缘不保证发 `X-Forwarded-Proto`，网关 cf 模式用 `FORCE_HTTPS` 强制 Cookie `Secure`——**勿删**。CF 免费层 100s 无响应硬超时（524）是产品限制，compact 类同步长命令会挂，属已知取舍。
+10. **控制面板（admin.mjs + admin/）**：**只绑 127.0.0.1**——面板是本机控制台，手机/局域网/公网都无权访问，这是产品决策而非缺陷，别加远程访问面板的口子。鉴权复用 config.json 网关令牌（`?t=` → `dg_admin` Cookie，HttpOnly + SameSite=Strict）；**所有 POST 必须校验 `X-DG-Admin` 自定义头**（防本机恶意网页 CSRF/localhost 扫描，跨站请求过不了 CORS 预检带不了自定义头）——该防线勿删。约束 1 不破例：面板不做任何按 remoteAddress 的请求判断，127.0.0.1 只是绑址。
+11. **config.json 是唯一配置数据源**：frp 参数也存 `config.json.frp`（serverAddr/serverPort/authToken），`frp/frpc.toml` 只是 `applyPanelConfig`/启动时全量重生成的产物——勿手动编辑、勿在代码里把它当数据源回读（迁移入口只有 `migrateFrpIntoConfig` 一处）。写 config.json 必须走 `saveConfigAtomic`（临时文件 + rename，防写一半留坏文件）。**面板保存 = 重启网关+隧道，dsh 不动**（重启 dsh 会杀掉正在跑的 agent 会话）；start.mjs 用进程代际（gen）区分「面板主动重启」与「意外崩溃」——旧进程的退出/重连回调随 gen 失效，不得触发团灭逻辑。
 
 ## 文件与职责
 
 | 路径 | 职责 | 改动注意 |
 | --- | --- | --- |
-| `gateway.mjs` | 令牌认证 + 反代 + WS 隧道 + manifest 注入 + 流量统计（每小时一行 ↓↑ 字节 + 下行 top3 路径热点榜，静默时段不刷） | 改完必跑 `npm test`；下行口径 = 写回浏览器侧字节（post-gzip，即过隧道计费口径），勿改回上游侧计数 |
-| `start.mjs` | 拉起 dsh web + 网关 + 隧道（frp/ssh/cf）或 lan 直连，单窗口日志加前缀 | dsh 崩溃自动重启；网关/frpc/cloudflared 退出则团灭，ssh 退出则 3s 重拨（不团灭，见约束 7），lan 模式不启动隧道；cf 临时域名由 startCf 抓 cloudflared 日志（`extractCfUrl`）后拼令牌打印登录链接；dsh 直接 spawn node bin.js（见约束 6），杀派生树用 `taskkill /T` |
-| `setup.mjs` | 首次运行交互式配置（访问模式 frp/ssh/lan/cf + 公网域名 + SSH 连通性自检） | frp 全量重写 `frpc.toml`；ssh 写 `config.json` 的 `mode`/`ssh.*`；lan/cf 只写 `mode`；cf 额外检查 `cf/cloudflared` 二进制存在（缺失则给下载指引并退出）；改校验/渲染/ssh 参数必跑 `npm test` |
+| `gateway.mjs` | 令牌认证 + 反代 + WS 隧道 + manifest 注入 + 流量统计（每小时一行 ↓↑ 字节 + 下行 top3 路径热点榜，静默时段不刷） | 改完必跑 `npm test`；下行口径 = 写回浏览器侧字节（post-gzip，即过隧道计费口径），勿改回上游侧计数；保持单文件自包含 |
+| `start.mjs` | 进程编排 + 面板宿主：拉起面板/dsh/网关/隧道，单窗口日志加前缀 | dsh 崩溃自动重启（5 次×3s）；网关/frpc/cloudflared **意外**退出团灭，ssh 退出 3s 重拨（约束 7）；面板保存触发的重启靠 gen 代际区分，别绕过 stopGate/stopTunnel 直接 kill；cf 临时域名由 startCfProc 抓日志（`extractCfUrl`）→ 拼令牌打印 + 推面板；dsh 直接 spawn node bin.js（约束 6），杀派生树用 `taskkill /T`；`--no-ui` 关闭面板 |
+| `admin.mjs` + `admin/` | 本地控制面板：HTTP 服务（认证/CSRF/SSE 日志流）+ 前端（vanilla JS） | 约束 10；静态文件白名单 `STATIC_FILES` 闭集，加新文件要同步登记；前端 CSP `default-src 'self'`，别引入内联脚本/外部 CDN；令牌轮换后 POST 响应须 Set-Cookie 换新（否则面板把自己锁外面） |
+| `config-lib.mjs` | config.json 读写（`saveConfigAtomic`）、面板表单校验（`validatePanelConfig`）、frpc.toml 迁移与生成、`isConfigured`/`preflightForMode` | 约束 11；表单空串语义 = 「未改动」回退 existing（`pick` 助手），别用 `??` 挡空串——踩过 |
+| `setup.mjs` | 纯函数库：字段校验、frpc.toml 渲染/解析、ssh 参数构造与连通性自检 | 交互式配置已删除（面板取代），勿再加 readline 提问；改校验/渲染/ssh 参数必跑 `npm test` |
 | `patch-dsh.mjs` | 幂等补丁 DSH client-runtime（修复提问弹窗被重连刷没） | 锚点严格 LF + Tab；改锚点先跑 `npm test` |
 | `pwa/sw.js` | 最小 SW，只为满足 Chrome 可安装性；**不做缓存**（下拉误刷新类 bug 的教训），v2 推送的 push 事件也加在这里 | |
 | `pwa/icons/` | dsh 官方鲸鱼 logo（白底黑鲸，maskable 版缩到 68% 保安全区） | 源文件是 dsh 的 `/favicon.svg` |
-| `frp/frpc.toml.example` | 隧道配置模板 | 真实 `frpc.toml` 含 token，已 gitignore |
+| `frp/frpc.toml.example` | 隧道配置模板 | 真实 `frpc.toml` 含 token，已 gitignore；且它只是生成产物（约束 11） |
 | `cf/` | cloudflared 二进制放置目录 + 下载指引 | 二进制已 gitignore；下载方式见 `cf/README.md` |
 
 ## 密钥纪律

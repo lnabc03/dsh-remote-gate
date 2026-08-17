@@ -1,24 +1,12 @@
-// setup.mjs — 首次运行交互式配置（访问模式 frp/ssh/lan；frp/ssh 含公网域名）
-// 纯函数（解析/校验/渲染/合并/ssh 参数构造/自检结果分析）可被 test/setup.test.mjs 单测；交互循环与连通性自检只在 ensureConfigured 内触发。
-// 由 start.mjs 在启动前调用；也可直接 node setup.mjs 单独跑。
+// setup.mjs — 纯函数库：校验/归一化、frpc.toml 渲染与解析、ssh 参数构造与连通性自检
+// 交互式命令行配置已移除（由本地控制面板替代，见 admin.mjs / config-lib.mjs）。
+// 纯函数被 test/setup.test.mjs 单测；调用方：config-lib.mjs（校验/渲染）、start.mjs（ssh 参数/自检）。
 
-import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { spawnSync } from 'node:child_process'
-import { createInterface } from 'node:readline'
-import { fileURLToPath } from 'node:url'
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url))
-const FRPC_PATH = path.join(__dirname, 'frp', 'frpc.toml')
-const CONFIG_PATH = path.join(__dirname, 'config.json')
-
-// 日志标签与 start.mjs 对齐：'[setup] ' 补齐 8 列，消息列对齐
-const SETUP_TAG = '[setup] '
-const say = (msg) => console.log(SETUP_TAG + msg)
-const sayErr = (msg) => console.error(SETUP_TAG + msg)
-
-// ---- CLI 标志 -----------------------------------------------------------------
+// ---- CLI 标志（保留解析工具；start.mjs 只消费 --no-ui/--help，其余标志由面板取代） ---------
 export function parseArgs(argv) {
   const flags = {
     setup: false,
@@ -31,6 +19,7 @@ export function parseArgs(argv) {
     sshPort: undefined,
     sshUser: undefined,
     sshKey: undefined,
+    noUi: false,
     help: false,
   }
   for (let i = 0; i < argv.length; i++) {
@@ -46,6 +35,7 @@ export function parseArgs(argv) {
     else if (a === '--ssh-port') flags.sshPort = next()
     else if (a === '--ssh-user') flags.sshUser = next()
     else if (a === '--ssh-key') flags.sshKey = next()
+    else if (a === '--no-ui') flags.noUi = true
     else if (a === '--help' || a === '-h') flags.help = true
     // 未知标志静默忽略，交给其余逻辑
   }
@@ -115,7 +105,7 @@ export function tomlString(s) {
   return '"' + String(s).replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"'
 }
 
-// 只读取 --setup 需要回填默认值的那 3 个标量键；不保留未知内容（全量重写策略）。
+// 只读取迁移需要的那 3 个标量键；不保留未知内容（全量重写策略）。
 function unquoteToml(v) {
   if (v.length < 2) return v
   const q = v[0]
@@ -144,7 +134,8 @@ export function readFrpcConfig(text) {
 export function renderFrpcToml({ serverAddr, serverPort, authToken }) {
   return [
     '# frpc 配置 — dsh-remote-gate 网关隧道',
-    '# 由 setup.mjs 生成（首次运行或 --setup）。本文件含 frps 认证 token，勿提交（已 gitignore）。',
+    '# 由 config-lib.mjs 从 config.json 全量重生成（数据源是 config.json 的 frp 字段，勿手动编辑）。',
+    '# 本文件含 frps 认证 token，勿提交（已 gitignore）。',
     '',
     'serverAddr = ' + tomlString(serverAddr),
     'serverPort = ' + serverPort,
@@ -195,10 +186,6 @@ export function cloudflaredBinaryName(platform = process.platform) {
   return platform === 'win32' ? 'cloudflared.exe' : 'cloudflared'
 }
 
-const CLOUDFLARED_RELEASES = 'https://github.com/cloudflare/cloudflared/releases'
-
-const FRP_RELEASES = 'https://github.com/fatedier/frp/releases'
-
 // ---- SSH 反向隧道 ---------------------------------------------------------------
 // 共享选项：密钥认证、严格主机校验、超时；host key 未预先录入时拒连（防中间人）。
 function sshCommonOptions(keyPath, port) {
@@ -248,7 +235,7 @@ export function sshSelfCheck({ host, port, user, keyPath }) {
   return attachSshHint(analyzeSshResult({ status: r.status, stderr: r.stderr, spawnError: r.error && r.error.message }), { host, user })
 }
 
-function attachSshHint(result, { host, user }) {
+export function attachSshHint(result, { host, user }) {
   switch (result.status) {
     case 'ssh-not-found':
       result.hint = '未找到 ssh 客户端；Windows 请在「设置 → 系统 → 可选功能」安装「OpenSSH 客户端」。'
@@ -266,254 +253,4 @@ function attachSshHint(result, { host, user }) {
       result.hint = 'SSH 连通性自检未通过，请检查服务器与认证配置。'
   }
   return result
-}
-
-// ---- 交互辅助 -------------------------------------------------------------------
-function printUsage() {
-  console.log('用法：npm start [选项]')
-  console.log('  --setup               强制进入交互式配置（即使已配置）')
-  console.log('  --mode <frp|ssh|lan|cf>  访问模式（frp / ssh / lan / cf）')
-  console.log('  --domain <域名>       公网域名（如 dsh.example.com；frp/ssh 模式）')
-  console.log('  frp 模式：')
-  console.log('  --server <地址>       frps 服务器地址')
-  console.log('  --server-port <端口>  frps 服务器端口（默认 7000）')
-  console.log('  --auth-token <令牌>   frps 认证 token')
-  console.log('  ssh 模式：')
-  console.log('  --ssh-host <地址>     SSH 服务器地址')
-  console.log('  --ssh-port <端口>     SSH 服务器端口（默认 22）')
-  console.log('  --ssh-user <用户名>   SSH 用户名')
-  console.log('  --ssh-key <路径>      SSH 私钥路径（默认 ~/.ssh/id_ed25519）')
-  console.log('  lan 模式：')
-  console.log('                       无隧道、无额外字段，网关直连局域网（绑 0.0.0.0）')
-  console.log('  cf 模式：')
-  console.log('                       无服务器、无域名、无额外字段；cloudflared 每次启动分配临时域名')
-  console.log('  --help, -h            显示帮助')
-  console.log('')
-  console.log('首次运行时若未配置会自动进入交互式配置（lan 模式无前置条件，无需任何字段）。')
-}
-
-function promptField(rl, { label, defaultValue, required, validate, normalize }) {
-  const ask = (text) => new Promise((resolve) => rl.question(text, resolve))
-  return (async () => {
-    for (;;) {
-      const dft = defaultValue !== undefined && defaultValue !== '' ? ` [${defaultValue}]` : ''
-      let answer
-      try {
-        answer = await ask(`${label}${dft}: `)
-      } catch {
-        return undefined // stdin 关闭 / EOF
-      }
-      let value = String(answer ?? '').trim()
-      if (value === '' && defaultValue !== undefined && defaultValue !== '') value = String(defaultValue)
-      if (value === '') {
-        if (required) {
-          console.log('  ✗ 此项必填，请重新输入')
-          continue
-        }
-        return ''
-      }
-      if (normalize) value = normalize(value)
-      if (validate) {
-        const err = validate(value)
-        if (err) {
-          console.log('  ✗ ' + err)
-          continue
-        }
-      }
-      return value
-    }
-  })()
-}
-
-function printFrpcMissingHint(name) {
-  sayErr(`未找到 frp/${name}；请从 ${FRP_RELEASES} 下载对应平台 release，把 ${name} 放进 frp/ 目录后重新运行 npm start`)
-  sayErr('配置已写入，下次运行不会再提问。')
-}
-
-// ---- 主入口（start.mjs 调用）------------------------------------------------------
-// 逐字段收集：标志优先，缺失项交互补齐。返回 { values } | { aborted } | { error }
-async function collectFields(specs, nonTty, rl) {
-  const values = {}
-  const missing = []
-  for (const spec of specs) {
-    if (spec.flag !== undefined) {
-      let v = spec.normalize ? spec.normalize(spec.flag) : String(spec.flag).trim()
-      const err = spec.validate ? spec.validate(v) : null
-      if (err) {
-        sayErr(`标志 ${spec.flagName} 无效：${err}`)
-        return { error: 'invalid-flag' }
-      }
-      values[spec.key] = spec.coerce ? spec.coerce(v) : v
-    } else {
-      missing.push(spec)
-    }
-  }
-  if (missing.length > 0) {
-    if (nonTty) {
-      sayErr('未提供完整配置且标准输入不是终端；请用 --mode 及对应标志补全，或交互式运行 npm start。')
-      return { error: 'non-tty' }
-    }
-    for (const spec of missing) {
-      const value = await promptField(rl, spec)
-      if (value === undefined) return { aborted: true }
-      values[spec.key] = spec.coerce ? spec.coerce(value) : value
-    }
-  }
-  return { values }
-}
-
-export async function ensureConfigured(argv = [], io = {}) {
-  const flags = parseArgs(argv)
-  if (flags.help) {
-    printUsage()
-    return { action: 'exit', code: 0 }
-  }
-
-  const frpcExists = fs.existsSync(FRPC_PATH)
-  const existingCfg = readConfigJson(readFileOr(CONFIG_PATH))
-  const existingFrpc = frpcExists ? readFrpcConfig(readFileOr(FRPC_PATH)) : {}
-  const existingSsh = existingCfg.ssh || {}
-  const nonTty = io.isTTY === undefined ? !process.stdin.isTTY : !io.isTTY
-
-  // 解析隧道模式：--mode 标志 > config.json > 默认 frp（老安装无 mode 字段 → frp，无感）
-  let mode = flags.mode !== undefined ? normalizeMode(flags.mode) : (existingCfg.mode || 'frp')
-  const modeErr = validateMode(mode)
-  if (modeErr) {
-    sayErr(`无效的隧道模式：${flags.mode}`)
-    return { action: 'exit', code: 1 }
-  }
-
-  const frpConfigured = frpcExists
-  const sshConfigured = !!(existingSsh.host && existingSsh.user)
-  const cfConfigured = existingCfg.mode === 'cf' // cf 无字段，config.json 记了 mode 即视为已配置
-  const modeChanged = flags.mode !== undefined && mode !== existingCfg.mode
-  const needsSetup = flags.setup || modeChanged || (mode === 'frp' && !frpConfigured) || (mode === 'ssh' && !sshConfigured) || (mode === 'cf' && !cfConfigured)
-
-  if (!needsSetup) return { action: 'skip' }
-
-  let rl = null
-  const ensureRl = () => {
-    if (!rl) rl = createInterface({ input: process.stdin, output: process.stdout })
-    return rl
-  }
-  try {
-    // 交互选模式（仅当未用 --mode 指定且是 TTY）
-    if (flags.mode === undefined && !nonTty) {
-      console.log('首次配置 dsh-remote-gate：')
-      console.log('')
-      const picked = await promptField(ensureRl(), {
-        label: '模式 (frp / ssh / lan / cf)', defaultValue: mode, required: true, validate: validateMode, normalize: normalizeMode,
-      })
-      if (picked === undefined) {
-        console.log('')
-        say('已取消，未写入任何配置。')
-        return { action: 'exit', code: 1 }
-      }
-      mode = picked
-    }
-
-    // 该模式的字段集合（lan 无隧道字段，也无需公网域名）
-    const specs = mode === 'frp'
-      ? [
-          { key: 'serverAddr', flagName: '--server', flag: flags.server, label: 'frps 服务器地址', defaultValue: existingFrpc.serverAddr, required: true, validate: validateServer },
-          { key: 'serverPort', flagName: '--server-port', flag: flags.serverPort, label: 'frps 服务器端口', defaultValue: existingFrpc.serverPort ?? 7000, required: true, validate: validatePort, coerce: (v) => Number(v) },
-          { key: 'authToken', flagName: '--auth-token', flag: flags.authToken, label: 'frps 认证 token', defaultValue: existingFrpc.authToken, required: true, validate: validateToken },
-          { key: 'domain', flagName: '--domain', flag: flags.domain, label: '公网域名', defaultValue: existingCfg.domain, required: true, validate: validateDomain, normalize: normalizeDomain },
-        ]
-      : mode === 'ssh'
-        ? [
-            { key: 'host', flagName: '--ssh-host', flag: flags.sshHost, label: 'SSH 服务器地址', defaultValue: existingSsh.host, required: true, validate: validateServer },
-            { key: 'port', flagName: '--ssh-port', flag: flags.sshPort, label: 'SSH 服务器端口', defaultValue: existingSsh.port ?? 22, required: true, validate: validatePort, coerce: (v) => Number(v) },
-            { key: 'user', flagName: '--ssh-user', flag: flags.sshUser, label: 'SSH 用户名', defaultValue: existingSsh.user ?? os.userInfo().username, required: true, validate: validateSshUser },
-            { key: 'keyPath', flagName: '--ssh-key', flag: flags.sshKey, label: 'SSH 私钥路径', defaultValue: existingSsh.keyPath ?? defaultSshKeyPath(), required: true, validate: validateSshKeyPath },
-            { key: 'domain', flagName: '--domain', flag: flags.domain, label: '公网域名', defaultValue: existingCfg.domain, required: true, validate: validateDomain, normalize: normalizeDomain },
-          ]
-        : []
-
-    const collected = await collectFields(specs, nonTty, ensureRl())
-    if (collected.aborted) {
-      console.log('')
-      say('已取消，未写入任何配置。')
-      return { action: 'exit', code: 1 }
-    }
-    if (collected.error) return { action: 'exit', code: 1 }
-    const values = collected.values
-
-    // 落盘
-    if (mode === 'frp') {
-      writeFile(FRPC_PATH, renderFrpcToml(values))
-      writeFile(CONFIG_PATH, JSON.stringify(mergeDomain({ ...existingCfg, mode: 'frp' }, values.domain), null, 2) + '\n')
-    } else if (mode === 'ssh') {
-      const nextCfg = {
-        ...existingCfg,
-        mode: 'ssh',
-        domain: values.domain,
-        ssh: { host: values.host, port: values.port, user: values.user, keyPath: values.keyPath },
-      }
-      writeFile(CONFIG_PATH, JSON.stringify(nextCfg, null, 2) + '\n')
-    } else {
-      // lan / cf：无隧道字段，仅记 mode；保留已有 domain/ssh 等字段便于切回
-      writeFile(CONFIG_PATH, JSON.stringify({ ...existingCfg, mode }, null, 2) + '\n')
-    }
-
-    // frp 模式：检查 frpc 二进制；ssh 模式：检查 ssh + 连通性自检；cf 模式：检查 cloudflared 二进制；lan 模式：无前置条件
-    if (mode === 'frp') {
-      const frpcName = frpcBinaryName()
-      if (!fs.existsSync(path.join(__dirname, 'frp', frpcName))) {
-        printFrpcMissingHint(frpcName)
-        return { action: 'exit', code: 1 }
-      }
-    } else if (mode === 'cf') {
-      const cfName = cloudflaredBinaryName()
-      if (!fs.existsSync(path.join(__dirname, 'cf', cfName))) {
-        sayErr(`未找到 cf/${cfName}；请从 ${CLOUDFLARED_RELEASES} 下载对应平台 release（Windows 选 cloudflared-windows-amd64.exe，改名为 ${cfName} 放进 cf/ 目录）后重新运行 npm start`)
-        sayErr('配置已写入，下次运行不会再提问。')
-        return { action: 'exit', code: 1 }
-      }
-    } else if (mode === 'ssh') {
-      const check = sshSelfCheck({ host: values.host, port: values.port, user: values.user, keyPath: values.keyPath })
-      if (check.status === 'ssh-not-found' || check.status === 'host-key-unverified' || check.status === 'auth-failed') {
-        sayErr(`SSH 连通性自检未通过（${check.status}）：${check.hint}`)
-        sayErr('配置已保存；修复后直接 npm start 即可，不会再提问。')
-        return { action: 'exit', code: 1 }
-      }
-      if (check.status !== 'ok') {
-        say(`提示：SSH 连通性自检未通过（${check.status}）：${check.hint}；已继续启动，隧道会持续重连。`)
-      }
-    }
-
-    // 汇总一行带过：模式/隧道/域名/落盘文件
-    const desc = mode === 'frp'
-      ? `frp → ${values.serverAddr}:${values.serverPort}，域名 ${values.domain}`
-      : mode === 'ssh'
-        ? `ssh → ${values.user}@${values.host}:${values.port}（私钥 ${values.keyPath}），域名 ${values.domain}`
-        : mode === 'cf'
-          ? 'cf（Cloudflare 临时隧道，零服务器零域名；每次启动分配临时域名）'
-          : 'lan（局域网直连，无隧道）'
-    say(`配置完成：${desc}；已写入 config.json` + (mode === 'frp' ? ' 与 frp/frpc.toml' : ''))
-    return { action: 'configured' }
-  } finally {
-    if (rl) rl.close()
-  }
-}
-
-// ---- IO ------------------------------------------------------------------------
-function readFileOr(file) {
-  try {
-    return fs.readFileSync(file, 'utf8')
-  } catch {
-    return ''
-  }
-}
-
-function writeFile(file, content) {
-  fs.writeFileSync(file, content, { mode: 0o600 })
-}
-
-// ---- 直接运行（node setup.mjs）--------------------------------------------------
-const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)
-if (isMain) {
-  ensureConfigured(process.argv.slice(2)).then((result) => {
-    if (result.action === 'exit') process.exit(result.code)
-  })
 }

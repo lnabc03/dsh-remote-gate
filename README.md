@@ -34,13 +34,15 @@
 ```bash
 git clone <repo> && cd dsh-remote-gate
 
-# 一键启动（Windows 可直接双击 start.bat）；首次运行会交互式询问「模式 + 对应字段」
+# 一键启动（Windows 可直接双击 start.bat）；首次运行自动打开本地控制面板填配置
 npm start
 ```
 
-`npm start`（即 `start.mjs`）首次运行先问**访问模式**（`frp` / `ssh` / `lan` / `cf`），再问对应字段，写入 `config.json`（frp 模式额外写 `frp/frpc.toml`），然后单窗口拉起进程，日志带 `[dsh]` / `[gate]` / `[frpc]` / `[ssh]` / `[cf]` 前缀：
+`npm start`（即 `start.mjs`）默认启动**本地控制面板**（只绑 `127.0.0.1`，自动以 Chrome/Edge `--app=` 应用窗口打开，无地址栏、独立任务栏图标；找不到则回退默认浏览器标签页；`--no-ui` 关闭面板回退纯命令行）。面板即原命令行提问的可视化替代：**模式选择（frp/ssh/lan/cf）+ 各模式字段 + 令牌管理 + 登录链接二维码 + 子进程状态灯 + 实时日志流**。保存配置 = 写 `config.json` + 自动重启网关与隧道（dsh 不动，保护正在运行的 agent 会话）。面板登录复用网关令牌（自动打开的 URL 自带），POST 接口另有防 CSRF 自定义头——本机其他网页无法替你改配置。
 
-- 先探测 3080：dsh web 已在运行则跳过，否则直接 `spawn(node, [全局 dsh 的 bin.js, 'web'])`（不经过 npx/shell，避免关窗口残留孤儿进程）；崩溃自动重启（5 次 × 3s）
+`config.json` 是唯一配置数据源：frp 的 serverAddr/port/token 也存其中（`frp` 字段），`frp/frpc.toml` 是保存/启动时全量重生成的产物，勿手动编辑（老安装启动时自动迁移）。面板之外，`start.mjs` 单窗口拉起进程，日志带 `[dsh]` / `[gate]` / `[frpc]` / `[ssh]` / `[cf]` 前缀：
+
+- 先探测 3080：dsh web 已在运行则跳过，否则直接 `spawn(node, [全局 dsh 的 bin.js, 'web'])`（不经过 npx/shell，避免关窗口残留孤儿进程）；崩溃自动重启（5 次 × 3s）；面板「重启 dsh」按钮只对本启动器拉起的 dsh 有效（补丁生效用）
 - 再启动网关与隧道；网关/frpc/cloudflared 退出则整体退出（cf 隧道重拨必然换临时域名，旧入口静默失效不如明说）；ssh 隧道退出则自动重拨（不团灭）；Ctrl+C 全部终止
 
 - **frp 模式**：需先下载 frpc（见下），问 frps 地址/端口（默认 7000）/token/域名
@@ -48,9 +50,9 @@ npm start
 - **lan 模式**：无需服务器、无需任何字段，网关绑 `0.0.0.0` 局域网直连（首次可能弹 Windows 防火墙提示，点「允许」）。打印的 IP 按系统默认路由选取（自动避开 VMware/Hyper-V 虚拟网卡），横幅同时列出其余候选 IP 供替换；校园网/企业 Wi-Fi 常开 AP 客户端隔离导致手机够不到电脑，可用「手机开热点、电脑连热点」排除
 - **cf 模式**：无需服务器、无需 Cloudflare 账号、无需域名——只需下载 cloudflared 二进制放进 `cf/`（见 [`cf/README.md`](cf/README.md)）。每次启动分配 `*.trycloudflare.com` 临时域名，启动日志打印带令牌的登录链接，需重新发到手机（旧链接随上次进程退出失效）。**代价**：入口不固定，PWA「添加到主屏幕」每次重启即作废（退化为浏览器标签页使用）；Cloudflare 免费层有 100 秒无响应硬超时（524），`/compact` 这类同步长命令超过 100s 会失败（SSE 流式输出不受影响）；TLS 在 CF 边缘终止，明文对 CF 可见（信任对象从自己的服务器换成 CF）；大陆访问 CF 边缘的延迟/稳定性因运营商和时段而异，建议先实测再决定是否替代 frp
 
-已配置后每次启动都会跳过提问；`npm start -- --setup` 重新配置（现有值作默认，回车保留）；`--mode frp|ssh|lan|cf` 切换模式。也支持命令行标志：`--server`、`--server-port`、`--auth-token`、`--ssh-host`、`--ssh-port`、`--ssh-user`、`--ssh-key`、`--domain`（`--help` 查看全部）。
+已配置后每次启动直接拉起全部进程；改配置/切模式都在控制面板完成（保存即自动重启网关与隧道生效），不再有命令行提问。
 
-网关首次运行生成随机访问令牌写入 `config.json`，启动日志会打印登录链接（lan 模式是局域网地址；cf 模式由 `[start]` 抓到临时域名后打印）：
+启动器在配置缺失时先生成随机访问令牌写入 `config.json`；登录链接在面板首页展示（含二维码，手机扫码即登录），控制台同步打印（lan 模式是局域网地址；cf 模式由 `[start]` 抓到临时域名后打印）：
 
 ```
 https://<你的域名>/?t=<token>                    # frp / ssh 模式
@@ -95,8 +97,11 @@ proxy_send_timeout 600s;
 | env | `DSH_GATE_TARGET_PORT` | `3080` | DSH Web UI 端口 |
 | env | `DSH_GATE_TOKEN` | — | 访问令牌（设置后不再读写 config.json） |
 | env | `DSH_GATE_DOMAIN` | — | 公网域名，打印登录链接用（`config.json` 的 `domain` 同效；lan/cf 模式忽略） |
-| `config.json` | `token` / `port` / `targetPort` / `domain` | — | 同上，文件形式；`domain` 由 setup 写入 |
+| env | `DSH_GATE_PANEL_PORT` | `3089` | 控制面板端口（占用时自动递增） |
+| env | `DSH_GATE_NO_OPEN` | — | 置 1 禁止启动时自动打开面板窗口 |
+| `config.json` | `token` / `port` / `targetPort` / `domain` | — | 同上，文件形式；`domain` 由面板写入 |
 | `config.json` | `mode` | `frp` | 访问模式：`frp` / `ssh` / `lan` / `cf`（缺省 frp，向后兼容；cf 无额外字段） |
+| `config.json` | `frp.serverAddr` / `frp.serverPort` / `frp.authToken` | — | frp 模式专用（唯一数据源；`frp/frpc.toml` 为生成产物） |
 | `config.json` | `ssh.host` / `ssh.port` / `ssh.user` / `ssh.keyPath` | — | ssh 模式专用：服务器地址 / 端口（默认 22）/ 用户名 / 私钥路径 |
 
 ## 安全模型
@@ -109,10 +114,12 @@ proxy_send_timeout 600s;
 
 **cf 模式**：TLS 在 Cloudflare 边缘终止，**会话明文对 CF 可见**（性质同 frp/ssh 下 TLS 在自己的服务器终止，只是信任对象换成了 CF）；临时域名随机不可猜测，但正式认证仍只有网关令牌一道，不要将链接泄露给不可信方；quick tunnel 官方定位为测试用途，无 SLA。
 
+**控制面板**：只绑 `127.0.0.1`（OS 层边界，手机/局域网/公网够不到）；登录复用网关令牌（`?t=` → `HttpOnly + SameSite=Strict` Cookie）；所有写操作要求 `X-DG-Admin` 自定义头，本机其他网页的跨站请求过不了 CORS 预检、带不了这个头，因此无法静默改配置或读走登录链接。
+
 ## 测试
 
 ```bash
-npm test   # 起 mock 上游 + 网关子进程：认证/头清洗/HTML 注入顺序/静态资产/路径穿越
+npm test   # 70 项：mock 上游 + 网关子进程冒烟、配置库、面板服务（令牌登录/CSRF/SSE）、日志过滤、补丁锚点
 ```
 
 > 真机端到端（SSH 反向隧道 / LAN 局域网直连）的逐步清单见 [`TESTING.md`](TESTING.md)。
@@ -122,13 +129,15 @@ npm test   # 起 mock 上游 + 网关子进程：认证/头清洗/HTML 注入顺
 | 路径 | 作用 |
 | --- | --- |
 | `gateway.mjs` | 网关本体：令牌认证 + 反代 + WS 隧道 + manifest 注入 |
-| `start.mjs` / `start.bat` | 一键启动（dsh web + 网关 + frp/ssh/cf 隧道或 lan 直连，单窗口） |
-| `setup.mjs` | 首次运行交互式配置（访问模式 frp/ssh/lan/cf + 公网域名 + SSH 连通性自检） |
+| `start.mjs` / `start.bat` | 一键启动（控制面板 + dsh web + 网关 + frp/ssh/cf 隧道或 lan 直连，单窗口） |
+| `admin.mjs` + `admin/` | 本地控制面板：HTTP 服务（127.0.0.1 + 令牌 + 防 CSRF）与前端页面（vanilla JS，QR 库为 vendored MIT 单文件） |
+| `config-lib.mjs` | 配置库：config.json 读写（原子写）、面板表单校验、frpc.toml 迁移与生成、隧道二进制前置检查 |
+| `setup.mjs` | 纯函数库：字段校验、frpc.toml 渲染/解析、ssh 参数构造与连通性自检（交互式配置已由面板取代） |
 | `patch-dsh.mjs` | 幂等补丁 DSH client-runtime（修复提问弹窗被重连刷没） |
 | `pwa/` | manifest.json、最小 service worker、图标（dsh 官方鲸鱼 logo） |
 | `frp/frpc.toml.example` | frp 客户端配置模板 |
 | `cf/` | cloudflared 二进制放置目录（下载指引见 `cf/README.md`） |
-| `test/gateway.test.mjs` | 冒烟测试 |
+| `test/` | gateway/admin/config-lib/setup/start/patch-dsh 六组测试 |
 
 ## Roadmap
 
