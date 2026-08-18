@@ -10,5 +10,11 @@ if errorlevel 1 (
   pause
   exit /b 1
 )
+node -e "process.exit(Number(process.versions.node.split('.')[0])>=18?0:1)"
+if errorlevel 1 (
+  echo [start] Node.js 18+ required. Please upgrade Node.js and retry.
+  pause
+  exit /b 1
+)
 start "dsh-remote-gate" /min node start.mjs %*
 exit /b 0

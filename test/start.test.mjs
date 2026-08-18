@@ -5,7 +5,7 @@ import { spawn } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
-import { shouldIgnoreLine, FRPC_IGNORE, CF_IGNORE, CF_IGNORE_RE, extractCfUrl, waitExit, panelWindowSize, panelProfileDir, clearSavedWindowPlacement } from '../start.mjs'
+import { shouldIgnoreLine, FRPC_IGNORE, CF_IGNORE, CF_IGNORE_RE, extractCfUrl, waitExit, panelWindowSize, panelProfileDir, clearSavedWindowPlacement, formatCrash } from '../start.mjs'
 
 test('shouldIgnoreLine：frpc 的 pool-full 告警被过滤', () => {
   const noisy = '2026-08-17 00:38:19 [E] [client/control.go:153] StartWorkConn contains error: work connection pool is full, discarding'
@@ -160,4 +160,15 @@ test('clearSavedWindowPlacement：无 Preferences 文件时不抛错', () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-test-panel-'))
   clearSavedWindowPlacement(tmpDir)
   fs.rmSync(tmpDir, { recursive: true, force: true })
+})
+
+test('formatCrash：含来源、版本、平台与堆栈，兼容非 Error 输入', () => {
+  const err = new Error('boom')
+  const text = formatCrash(err, 'uncaughtException', 'v20.0.0', 'win32')
+  assert.match(text, /uncaughtException \(node v20\.0\.0, win32\)/)
+  assert.match(text, /Error: boom/)
+  // 非 Error 的 rejection 值（如字符串）也不应抛错
+  const text2 = formatCrash('plain failure', 'unhandledRejection')
+  assert.match(text2, /unhandledRejection/)
+  assert.match(text2, /plain failure/)
 })

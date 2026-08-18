@@ -72,8 +72,8 @@ export function applyPatch(content) {
 
 function resolveGlobalRoot() {
   try {
-    // execSync 走 shell，Windows 上能正确解析 npm.cmd
-    const out = execSync('npm root -g', { encoding: 'utf8', windowsHide: true }).trim()
+    // execSync 走 shell，Windows 上能正确解析 npm.cmd；超时防 npm 异常时无限期卡住
+    const out = execSync('npm root -g', { encoding: 'utf8', windowsHide: true, timeout: 10000 }).trim()
     if (out) return out
   } catch { /* fall through to convention */ }
   if (process.platform === 'win32' && process.env.APPDATA) {

@@ -5,3 +5,4 @@ frp/frpc.toml
 cf/cloudflared.exe
 cf/cloudflared
 .dsh-usage-stats.json
+start-crash.log

@@ -125,6 +125,24 @@ function shutdown(code = 0) {
   setTimeout(() => process.exit(code), 500).unref()
 }
 
+// ---- 启动崩溃可见性 ---------------------------------------------------------------
+// start.bat 以「最小化控制台」拉起本进程：任何早期崩溃都会连窗口一起无声消失，
+// 双击后「什么都没发生」无法排查。因此致命错误一律追加写入 start-crash.log（仓库目录，
+// 已 gitignore），内容含时间、node 版本、平台与堆栈；控制台同步打印一行。
+const CRASH_LOG = path.join(__dirname, 'start-crash.log')
+let crashHandled = false
+export function formatCrash(err, origin, version = process.version, platform = process.platform) {
+  const stack = err && err.stack ? err.stack : String(err)
+  return `[${new Date().toISOString()}] ${origin} (node ${version}, ${platform})\n${stack}\n\n`
+}
+function fatalCrash(err, origin) {
+  if (crashHandled) return
+  crashHandled = true
+  try { fs.appendFileSync(CRASH_LOG, formatCrash(err, origin)) } catch { }
+  sayErr('start', `致命错误（详情已写入 start-crash.log）: ${err && err.message ? err.message : err}`)
+  shutdown(1)
+}
+
 function attach(p, tag, onLine) {
   for (const [stream, out] of [[p.stdout, process.stdout], [p.stderr, process.stderr]]) {
     if (!stream) continue
@@ -169,7 +187,7 @@ function resolveDshBin() {
   const candidates = []
   if (process.env.DSH_BIN) candidates.push(process.env.DSH_BIN)
   try {
-    const root = execSync('npm root -g', { encoding: 'utf8', windowsHide: true }).trim()
+    const root = execSync('npm root -g', { encoding: 'utf8', windowsHide: true, timeout: 10000 }).trim()
     if (root) candidates.push(path.join(root, '@deepseek-ai', 'dsh', 'lib', 'bin.js'))
   } catch { /* fall through */ }
   if (process.platform === 'win32' && process.env.APPDATA) {
@@ -561,24 +579,31 @@ function openInBrowser(url) {
           const profileDir = panelProfileDir()
           fs.mkdirSync(profileDir, { recursive: true })
           clearSavedWindowPlacement(profileDir)
-          spawn(bin, [
+          const child = spawn(bin, [
             `--user-data-dir=${profileDir}`,
             '--no-first-run',
             '--no-default-browser-check',
             '--app=' + url,
             `--window-size=${w},${h}`
-          ], { detached: true, stdio: 'ignore', windowsHide: true }).unref()
+          ], { detached: true, stdio: 'ignore', windowsHide: true })
+          // spawn 失败是异步 'error' 事件，没有监听器会抛 uncaughtException 炸掉整个启动器
+          child.on('error', (err) => say('start', `应用窗口拉起失败（${err.message}），请手动打开上面的面板地址`))
+          child.unref()
           startWatchdog()
           say('start', `已用应用窗口打开控制面板（${path.basename(bin)}，${w}×${h}）`)
           return
         }
       }
-      spawn('cmd.exe', ['/c', 'start', '""', url], { detached: true, stdio: 'ignore', windowsHide: true }).unref()
+      const cmd = spawn('cmd.exe', ['/c', 'start', '""', url], { detached: true, stdio: 'ignore', windowsHide: true })
+      cmd.on('error', (err) => say('start', `打开默认浏览器失败（${err.message}），请手动打开上面的面板地址`))
+      cmd.unref()
       say('start', '已在默认浏览器打开控制面板')
       return
     }
     const opener = process.platform === 'darwin' ? 'open' : 'xdg-open'
-    spawn(opener, [url], { detached: true, stdio: 'ignore' }).unref()
+    const op = spawn(opener, [url], { detached: true, stdio: 'ignore' })
+    op.on('error', (err) => say('start', `打开默认浏览器失败（${err.message}），请手动打开上面的面板地址`))
+    op.unref()
     say('start', '已在默认浏览器打开控制面板')
   } catch {
     say('start', '自动打开浏览器失败，请手动复制上面的面板地址访问')
@@ -594,6 +619,7 @@ function startWatchdog() {
     const p = spawn(process.execPath, [path.join(__dirname, 'watchdog.mjs'), String(process.pid), panelProfileDir()], {
       detached: true, stdio: 'ignore', windowsHide: true,
     })
+    p.on('error', () => { state.watchdog = null }) // 异步 spawn 失败：看门狗是增强不是必需
     p.unref()
     state.watchdog = p
   } catch { /* 看门狗是增强不是必需，失败不影响主流程 */ }
@@ -691,7 +717,11 @@ const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPat
 if (isMain) {
   process.on('SIGINT', () => shutdown(0))
   process.on('SIGTERM', () => shutdown(0))
-  main()
+  process.on('uncaughtException', (err) => fatalCrash(err, 'uncaughtException'))
+  process.on('unhandledRejection', (err) => fatalCrash(err, 'unhandledRejection'))
+  // 首行横幅：窗口连这行都没有 = node 根本没起来（PATH/权限/杀软），与脚本内崩溃区分开
+  say('start', `node ${process.version} / ${process.platform} ${process.arch}`)
+  main().catch((err) => fatalCrash(err, 'main'))
 }
 
 export { shouldIgnoreLine, FRPC_IGNORE, CF_IGNORE, CF_IGNORE_RE, extractCfUrl, waitExit }
