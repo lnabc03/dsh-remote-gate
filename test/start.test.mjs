@@ -5,7 +5,7 @@ import { spawn } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
-import { shouldIgnoreLine, FRPC_IGNORE, CF_IGNORE, CF_IGNORE_RE, extractCfUrl, waitExit, panelWindowSize, panelProfileDir, clearSavedWindowPlacement, formatCrash } from '../start.mjs'
+import { shouldIgnoreLine, FRPC_IGNORE, CF_IGNORE, CF_IGNORE_RE, extractCfUrl, waitExit, panelWindowSize, panelProfileDir, clearSavedWindowPlacement, formatCrash, samePath } from '../start.mjs'
 
 test('shouldIgnoreLine：frpc 的 pool-full 告警被过滤', () => {
   const noisy = '2026-08-17 00:38:19 [E] [client/control.go:153] StartWorkConn contains error: work connection pool is full, discarding'
@@ -171,4 +171,22 @@ test('formatCrash：含来源、版本、平台与堆栈，兼容非 Error 输�
   const text2 = formatCrash('plain failure', 'unhandledRejection')
   assert.match(text2, /unhandledRejection/)
   assert.match(text2, /plain failure/)
+})
+
+test('samePath：同一文件的不同路径形态判等（联接点/大小写）', () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-test-samepath-'))
+  const file = path.join(tmpDir, 'a.mjs')
+  fs.writeFileSync(file, '// x')
+  try {
+    assert.equal(samePath(file, file), true)
+    assert.equal(samePath(file, path.join(tmpDir, 'b.mjs')), false)
+    assert.equal(samePath(file, path.join(tmpDir, '不存在.mjs')), false)
+    if (process.platform === 'win32') {
+      // 盘符/目录大小写差异不影响判等
+      assert.equal(samePath(file, file.toLowerCase()), true)
+      assert.equal(samePath(file, file.toUpperCase()), true)
+    }
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true })
+  }
 })

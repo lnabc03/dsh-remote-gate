@@ -128,6 +128,7 @@
 - [ ] Ctrl+C 正常退出：面板应用窗口随之一并关闭（不依赖看门狗）
 - [ ] 启动崩溃可见性：制造一个早期致命错误（如把 `config.json` 写成非法 JSON 之外的破坏——删掉仓库写权限 / 或用旧版 Node <18 跑 `node start.mjs`）→ 仓库目录生成/追加 `start-crash.log`，含时间、node 版本、平台与堆栈；控制台首行始终先打印 `node vX.Y.Z / 平台` 横幅（无横幅 = node 没起来）
 - [ ] `start.bat` 在 Node <18 的机器上：提示需要 18+ 并 pause，不静默闪退
+- [ ] 经目录联接点进入仓库启动（`New-Item -ItemType Junction -Path C:\link -Target <仓库>` 后在联接路径里 `node start.mjs`）：正常打印横幅并拉起，不静默秒退（`isMain` 的 realpath 兼容）
 - [ ] 控制台打印 `控制面板: http://127.0.0.1:3089/?t=…`（3089 被占时自动递增）
 - [ ] 浏览器直接开 `http://127.0.0.1:3089/`（不带令牌）→ 401 提示页；带错误令牌 → 403
 - [ ] `npm start -- --no-ui`：不起面板、不开浏览器，纯命令行照旧

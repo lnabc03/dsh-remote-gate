@@ -713,7 +713,18 @@ async function main() {
   }
 }
 
-const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)
+// 主入口判定必须容忍路径差异：Node 默认对主模块做 realpath（--preserve-symlinks-main 才关）。
+// 经目录联接点/软链进入仓库时（另一台设备踩过），argv[1] 是链接路径、import.meta.url 是
+// 真实路径，严格相等会把 main() 静默跳过——进程零输出、exit 0 秒退，连 start-crash.log 都没机会写。
+// Windows 文件系统大小写不敏感，比较时统一小写兜底。
+export function samePath(a, b) {
+  if (a === b) return true
+  const fold = (s) => (process.platform === 'win32' ? s.toLowerCase() : s)
+  if (fold(a) === fold(b)) return true
+  try { return fold(fs.realpathSync.native(a)) === fold(fs.realpathSync.native(b)) } catch { return false }
+}
+
+const isMain = process.argv[1] && samePath(path.resolve(process.argv[1]), fileURLToPath(import.meta.url))
 if (isMain) {
   process.on('SIGINT', () => shutdown(0))
   process.on('SIGTERM', () => shutdown(0))
