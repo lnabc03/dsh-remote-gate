@@ -40,7 +40,8 @@
 | 现象 | 根因 | 修复 / 现状 |
 | --- | --- | --- |
 | （设计前提）经 frp/ssh 后所有请求的 `remoteAddress` 都是 127.0.0.1 | 隧道在本机回灌 | **绝不引入任何基于 IP 的逻辑**：IP 审批/限流/「本机」栅栏在此拓扑下失效且有安全反效果（远端用户被误判为本机）。认证只有令牌 + HttpOnly Cookie；防爆破用全局失败计数（30 次/分钟），不按 IP |
-| dsh 敏感 API（工作区/设置/凭证）被拦 | dsh 有本机风控，要求请求来自本机 | 网关转发必须与本机浏览器访问**不可区分**：`Host` 重写为 `127.0.0.1:3080`；丢弃 `Origin`/`Referer`/`X-Forwarded-*`/`X-Real-IP`/`Forwarded`；网关自身的 `dg_token` Cookie 不上行 |
+| dsh 敏感 API（工作区/设置/凭证）被拦 | dsh 有本机风控，要求请求来自本机 | 网关转发必须与本机浏览器访问**不可区分**：`Host` 重写为 `127.0.0.1:3080`；`Origin` 重写为 `http://127.0.0.1:3080`（仅原请求带 Origin 时）；丢弃 `Referer`/`X-Forwarded-*`/`X-Real-IP`/`Forwarded`；网关自身的 `dg_token` Cookie 不上行 |
+| 远程经网关用 dshmarket 安装/更新插件报 `更新失败: … — untrusted origin`，本机正常 | dshmarket 所有变更类 POST 做 same-origin 校验：**Origin 头必须存在且与 Host 一致**；网关原先把 Origin 整个丢弃，缺 Origin 直接判 403 | `Origin` 由「丢弃」改为「重写为本机源」——本机浏览器发 POST 本来就带 `Origin: http://127.0.0.1:3080`，重写后才算真正「不可区分」；dsh 核心的 `isTrustedApiRequest` 同样只比 host 部分，重写后照样通过 |
 | frps 日志刷 `work connection pool is full`，手机加载卡 | 移动端加载 SPA 并发几十个连接，frpc 预建连接池打满 | frps 端 `transport.maxPoolCount` 与 frpc 端 `transport.poolCount`（20）对齐 |
 | ssh 首次连接被拒 | `StrictHostKeyChecking=yes` 下主机指纹未录入 | 设计如此（防中间人，**绝不放宽成 accept-new/no**）：首次前先手动 `ssh` 一次录入 known_hosts。私钥公钥预先入 `authorized_keys`，`BatchMode=yes` 拒绝密码交互 |
 | 隧道断开后行为不一致 | frpc/cloudflared 退出 = 入口失效 = **团灭**；ssh 退出 = 入口不变，3s 自动重拨**不团灭** | 两种语义相反，勿混用：cf 重拨必换临时域名，静默失效不如明说；ssh 反向隧道 `remotePort` 固定 3088（反代硬编码指向它） |

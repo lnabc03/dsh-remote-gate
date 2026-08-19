@@ -14,7 +14,7 @@
 ## 不可违反的设计约束（都是踩坑换来的）
 
 1. **绝不引入任何基于 IP 的逻辑**。经 frp 后所有请求的 remoteAddress 都是 127.0.0.1，IP 审批/限流/本机栅栏在此拓扑下全部失效且有安全反效果（远端用户会被误判为"本机"）。认证只有令牌 + HttpOnly Cookie 一条路；防爆破用全局失败计数，不按 IP。
-2. **转发给 DSH 的请求必须与本机浏览器访问不可区分**（dsh 对敏感 API 有本机风控）：Host 重写为 `127.0.0.1:3080`；丢弃 `Origin`/`Referer`/`X-Forwarded-*`/`X-Real-IP`/`Forwarded`；网关自身的 `dg_token` Cookie 不转发上游。改 `cleanHeaders` 时不要放宽。`Accept-Encoding` **只在导航请求（Accept 含 text/html，可能需要 HTML 注入）上摘除**，其余请求必须放行压缩——全量摘除会让 JS bundle 未压缩过隧道，按出站计费的服务器流量翻好几倍（踩过，半天近 1G）。且 dsh 上游自身完全不压缩（实测），**网关在出站侧对可压响应做 gzip**（>1KB、非流式、上游未压缩、客户端接受）——`GZIP_TYPE`/`mayGzip` 的豁免（event-stream、小响应、已压缩、非 200）勿删，流式响应必须保持逐块透传。
+2. **转发给 DSH 的请求必须与本机浏览器访问不可区分**（dsh 对敏感 API 有本机风控）：Host 重写为 `127.0.0.1:3080`；`Origin` **重写**为 `http://127.0.0.1:3080`（仅当原请求带 Origin 时）——**不能丢弃**：dsh 生态插件（如 dshmarket）的 same-origin POST 校验要求 Origin 存在且与 Host 一致，缺 Origin 直接 403 `untrusted origin`（踩过）；丢弃 `Referer`/`X-Forwarded-*`/`X-Real-IP`/`Forwarded`；网关自身的 `dg_token` Cookie 不转发上游。改 `cleanHeaders` 时不要放宽。`Accept-Encoding` **只在导航请求（Accept 含 text/html，可能需要 HTML 注入）上摘除**，其余请求必须放行压缩——全量摘除会让 JS bundle 未压缩过隧道，按出站计费的服务器流量翻好几倍（踩过，半天近 1G）。且 dsh 上游自身完全不压缩（实测），**网关在出站侧对可压响应做 gzip**（>1KB、非流式、上游未压缩、客户端接受）——`GZIP_TYPE`/`mayGzip` 的豁免（event-stream、小响应、已压缩、非 200）勿删，流式响应必须保持逐块透传。
 3. **HTML 注入点必须紧跟 `<head>` 之后**。dsh 自带 `<link rel="manifest">`（无 PNG 图标），浏览器只认文档中第一个 manifest 链接，注在 `</head>` 前会被它挤掉（安卓无法安装的根因）。
 4. **`/pwa/*` 静态资产豁免认证**。iOS「添加到主屏幕」抓图标/manifest 不带会话 Cookie，拦 401 会丢图标。仅限这个前缀下的白名单文件，路径穿越防护不可删；未来 `/pwa/push/*` 这类动态端点必须另行鉴权，不能跟着豁免。
 5. 注入改写响应体时，必须删掉 `Transfer-Encoding`/`Connection`/`Keep-Alive` 并重写 `Content-Length`——TE 与 CL 并存会被浏览器 fetch 拒收（踩过）。前提是导航请求的 `Accept-Encoding` 被摘掉（见约束 2）让上游返回未压缩 HTML，压缩字节不可注入。

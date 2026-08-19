@@ -157,7 +157,7 @@ test('带 Cookie 访问 → 代理成功且注入 manifest', async () => {
   assert.ok(!body.includes('randomUUID'), 'frp/ssh 模式不应注入 randomUUID polyfill')
 })
 
-test('上游看到的头：host 重写、无 x-forwarded-*、无 origin、无网关 Cookie', async () => {
+test('上游看到的头：host 重写、origin 重写为本机源、无 x-forwarded-*、无网关 Cookie', async () => {
   const cookie = await loginCookie()
   const res = await fetch(base() + '/api/data', {
     headers: {
@@ -172,9 +172,14 @@ test('上游看到的头：host 重写、无 x-forwarded-*、无 origin、无网
   for (const k of Object.keys(lastUpstreamHeaders)) {
     assert.ok(!k.startsWith('x-forwarded'), '上游不应收到 ' + k)
   }
-  assert.ok(!('origin' in lastUpstreamHeaders))
+  // origin 不丢弃、重写为与 host 一致的本机源——dshmarket 等插件的 same-origin
+  // POST 校验要求 Origin 存在且匹配 Host，缺了会 403 untrusted origin
+  assert.equal(lastUpstreamHeaders.origin, `http://127.0.0.1:${UP_PORT}`)
   assert.ok(!('x-real-ip' in lastUpstreamHeaders))
   assert.ok(!String(lastUpstreamHeaders.cookie || '').includes('dg_token'), '网关 Cookie 不应泄露给上游')
+  // 原始请求不带 Origin 时上游也不应收到（与本机浏览器行为一致）
+  await fetch(base() + '/api/data', { headers: { Cookie: cookie } })
+  assert.ok(!('origin' in lastUpstreamHeaders), '请求无 Origin 时上游不应收到 Origin')
 })
 
 test('accept-encoding：导航请求（Accept 含 text/html）摘除，其余保留（隧道流量大头）', async () => {

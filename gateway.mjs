@@ -111,7 +111,11 @@ function lanIp() {
 
 // 转发到 dsh 的头白名单：抹掉一切能暴露「非本机访问」的痕迹
 // - host 重写为 127.0.0.1:3080
-// - 丢弃 origin / referer / x-forwarded-* / forwarded / x-real-ip
+// - origin 重写为 http://127.0.0.1:3080（不丢弃！dsh 生态插件如 dshmarket 的
+//   same-origin POST 校验要求 Origin 存在且与 Host 一致，缺了直接 403 untrusted
+//   origin——本机浏览器发 POST 本来就带这个 Origin，重写后才算「不可区分」）；
+//   仅当原始请求带 origin 时才重写，不带则不加（与本机浏览器行为一致）
+// - 丢弃 referer / x-forwarded-* / forwarded / x-real-ip
 // - accept-encoding 只在导航请求（Accept 含 text/html，可能返回 HTML 需要注入）上丢弃，
 //   强制未压缩以便注入；静态资源/API 放行压缩——全量摘除会让 JS bundle 以未压缩体积
 //   过隧道，流量翻好几倍（服务器按出站计费时这是最大的浪费源，实测半天近 1G）
@@ -135,6 +139,7 @@ function cleanHeaders(req) {
     out[k] = req.headers[k]
   }
   out['host'] = TARGET_HOST + ':' + TARGET_PORT
+  if (req.headers.origin !== undefined) out['origin'] = 'http://' + TARGET_HOST + ':' + TARGET_PORT
   return out
 }
 
