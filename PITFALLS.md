@@ -30,6 +30,7 @@
 | `.bat` 里写中文注释/提示变成乱码命令被执行 | cmd 用 GBK 解析批处理文件 | `.bat` 必须纯 ASCII |
 | 面板 `--app` 窗口尺寸设置不生效 | Edge 已在运行时忽略 `--window-size` | 面板用隔离的用户数据目录（独立 profile）启动应用窗口 |
 | 控制台被 X 掉 / 崩溃后，面板窗口静默挂着（SSE 断开、按钮失效，用户无从得知） | 同上：`CTRL_CLOSE_EVENT` 下 Node 无任何清理回调，面板应用窗口是独立浏览器进程，没人收尸 | **看门狗** `watchdog.mjs`（detached、无控制台，不随控制台死）：轮询父进程（start.mjs）存活，父死则按命令行中的面板专用 profile 路径精确关闭浏览器进程树后自杀；正常关停（Ctrl+C）由 `shutdown()` 主动 `killPanelBrowser()`，看门狗只兜底意外死亡；匹配串只命中专用 profile，不会误伤用户主浏览器；前端 SSE 断开 8s 亮离线横幅，补上「静默」的感知缺口 |
+| 控制台里按回车重开面板要按**两次**才生效 | conhost 默认开 QuickEdit：鼠标一点窗口就进入「选择」态、输出冻结，第一次回车只是退出选择态，第二次才送到 node 的 stdin | `start.bat` 改为经 **PowerShell 宿主**拉起 node（pwsh 优先、powershell 回退）——PowerShell 启动时主动禁用 QuickEdit，点选不再冻结，回车一次即生效 |
 | 启动后「命令行 + 面板」两个窗口，感知笨拙 | 控制台是生命周期所有者（面板由 start.mjs 托管，无法单独存活），但用户日常只需要面板 | `start.bat` 用 `start /min` 把控制台**最小化到任务栏**（日志仍在，点开即看），bat 自身 `exit /b` 闪退；面板窗口被误关时在控制台按回车重开 |
 | 新设备上 `node start.mjs` 零输出、exit 0 秒退（双击 bat / npm start 同样无声失败，连崩溃日志都没有） | 该设备的仓库目录经**目录联接点（junction）**进入；Node 默认对主模块做 realpath，`import.meta.url` 拿到真实路径而 `process.argv[1]` 是链接路径 → `isMain` 严格相等判定失败 → `main()` 根本没执行 | 主入口判定改走 `samePath()`：先严格等，再 Windows 小写兜底，最后 `fs.realpathSync.native` 双向解析比真实路径；`--preserve-symlinks-main` 不改变 import.meta.url 已是 realpath 的事实，只能在判定侧兼容 |
 | 新设备上早期崩溃「无声消失」（最小化控制台随进程一起没，什么痕迹都不留） | bat 以最小化窗口拉起 node，任何在打印日志前发生的崩溃都不可见 | `fatalCrash` 兜底：`uncaughtException`/`unhandledRejection`/`main()` 异常一律追加写 `start-crash.log`（含版本/平台/堆栈）再退出；控制台首行必打 node 版本横幅区分「node 没起来」与「脚本内崩溃」；浏览器/看门狗的 spawn 全部补 `'error'` 监听（异步 spawn 失败无监听器 = uncaughtException 炸掉整个启动器） |
