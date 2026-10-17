@@ -53,13 +53,19 @@ const HTML_LIMIT = 4 * 1024 * 1024
 // Host 的 authority）。没有这个 Cookie，网关转发出去的每一个请求都会被 dsh 401 挡下——
 // 「把 Host 改写成 127.0.0.1:3080 就能冒充本机」不再成立，因为本机浏览器同样得先出示 Cookie。
 //
-// 好消息是整合成本很低：网关把 Host **固定**重写成 127.0.0.1:3080，所以
-//   - Cookie 名（sha256(authority)）与受众对所有远端设备、所有隧道模式都是同一个值；
-//   - 签名密钥存在 dsh 的 credentials 里（持久），Cookie 能跨 dsh 重启继续有效（默认 30 天）；
-//   - 只有启动令牌每次进程都变，且只用于「换 Cookie」这一次交换。
-// 所以网关只需要在「导航请求被 401」时把浏览器引到带启动令牌的根路径，让 dsh 种好 Cookie
-// 再 303 回应用；之后一切照旧。启动令牌由 start.mjs 从 dsh 的 stdout 抓取后写进
-// DSH_TOKEN_FILE（每次 dsh 启动重写），网关按 mtime 懒读，dsh 重启换令牌也无需重启网关。
+// **这份 Cookie 由网关自己持有，绝不让浏览器参与交换。** 网关把 Host 固定重写成
+// 127.0.0.1:3080，所以 Cookie 名（sha256(authority)）与受众对所有远端设备、所有隧道模式
+// 都是同一个值，一份就够全网用：
+//   - 启动令牌由 start.mjs 从 dsh stdout 抓进 DSH_TOKEN_FILE（已 gitignore，每次 dsh 启动
+//     重写），网关按 mtime 懒读；需要时（首次导航、或缓存被 dsh 拒绝）就 GET
+//     `/?token=<令牌>` 换一份，缓存 10 分钟；
+//   - 转发时丢掉客户端的 `dsh-auth-*`、换上自己那份；响应里的 `dsh-auth-*` Set-Cookie 也
+//     不下发。浏览器只留网关自己的 dg_token。
+//
+// 反过来做（401 → 把浏览器重定向到 `/?token=…` → dsh 种 Cookie → 303 回 `/`）是踩过的坑：
+// 它要求 Cookie 在整条重定向链里落盘并回传，而 WebKit 对跨站发起的导航链不送
+// SameSite=Strict Cookie，dsh 又只认同名 Cookie 的**第一份**（实测）。iPhone 上的表现就是
+// 无限打转、浏览器报「重定向次数过多」，access log 里是一串 `302 /` → `303 /?token=…`。
 const DSH_TOKEN_FILE = process.env.DSH_GATE_DSH_TOKEN_FILE || path.join(__dirname, '.dsh-web-token')
 const DSH_TOKEN_FILE_TTL = 1000 // stat 节流：每秒最多查一次 mtime
 let dshTok = { value: process.env.DSH_GATE_DSH_TOKEN || '', mtime: -1, at: 0 }
@@ -89,17 +95,51 @@ function isNavRequest(req) {
   return String(req.headers.accept || '').includes('text/html')
 }
 
-// 串里已带 token= 就不再重试——否则启动令牌失效时会自己重定向自己，形成重定向环
-function hasTokenParam(url) {
-  return /[?&]token=/.test(String(url || ''))
-}
-
 let noTokenWarnedAt = 0
 function warnNoDshToken() {
   const now = Date.now()
   if (now - noTokenWarnedAt < 60_000) return
   noTokenWarnedAt = now
   console.log('未取得 dsh 启动令牌，远端导航会 401；用 npm start 拉起 dsh，或设 DSH_GATE_DSH_TOKEN')
+}
+
+// ---- 网关自持的 dsh 会话 Cookie ------------------------------------------------
+const DSH_COOKIE_PREFIX = 'dsh-auth-'
+const MINT_TTL = 600_000 // 缓存 10 分钟：dsh 的 Cookie 本身 30 天有效，这里只防长期不刷新
+const minted = { pair: '', exp: 0, inflight: null }
+
+function freshDshCookie() {
+  return minted.pair !== '' && Date.now() < minted.exp ? minted.pair : ''
+}
+
+// 向 dsh 换一份会话 Cookie；force = 「缓存那份已被 dsh 拒绝」，丢弃重换。并发单飞。
+function mintDshCookie(force = false) {
+  if (!force && freshDshCookie() !== '') return Promise.resolve(freshDshCookie())
+  if (minted.inflight !== null) return minted.inflight
+  const tok = dshLaunchToken()
+  if (tok === '') return Promise.resolve('')
+  if (force) { minted.pair = ''; minted.exp = 0 }
+  const p = new Promise((resolve) => {
+    const req = http.request({
+      host: TARGET_HOST, port: TARGET_PORT, method: 'GET',
+      path: '/?token=' + encodeURIComponent(tok),
+      headers: { host: TARGET_HOST + ':' + TARGET_PORT, accept: 'text/html' },
+    }, (res) => {
+      const raw = [].concat(res.headers['set-cookie'] || [])
+        .find((s) => String(s).startsWith(DSH_COOKIE_PREFIX))
+      res.resume()
+      if (raw !== undefined) {
+        minted.pair = String(raw).split(';')[0]
+        minted.exp = Date.now() + MINT_TTL
+      }
+      resolve(minted.pair)
+    })
+    req.on('error', () => resolve(''))
+    req.setTimeout(5000, () => req.destroy())
+    req.end()
+  }).finally(() => { minted.inflight = null })
+  minted.inflight = p
+  return p
 }
 
 // ---- helpers ----------------------------------------------------------------
@@ -186,9 +226,17 @@ function cleanHeaders(req) {
     if (drop.has(lk) || lk.startsWith('x-forwarded-')) continue
     if (lk === 'accept-encoding' && isNav) continue
     if (lk === 'cookie') {
-      const kept = String(req.headers[k]).split(';')
-        .filter(p => p.split('=')[0].trim() !== COOKIE_NAME).join(';')
-      if (kept.trim()) out[k] = kept
+      const mint = freshDshCookie()
+      const kept = String(req.headers[k]).split(';').map((p) => p.trim()).filter(Boolean)
+        .filter((p) => {
+          const name = p.split('=')[0].trim()
+          if (name === COOKIE_NAME) return false
+          // 网关自己那份 Cookie 在手时，客户端的同名 Cookie 一律丢掉：dsh 只认同名第一份，
+          // 客户端残留的旧值会把它盖成 401（移动端重定向环的成因之一）
+          return !(mint !== '' && name.startsWith(DSH_COOKIE_PREFIX))
+        })
+      if (mint !== '') kept.push(mint)
+      if (kept.length > 0) out[k] = kept.join('; ')
       continue
     }
     out[k] = req.headers[k]
@@ -252,6 +300,8 @@ function page(title, body) {
 const UNAUTH_PAGE = page('未授权', '<h2>🔒 DSH Remote Gate</h2><p class="muted">首次访问需带 <code>?t=&lt;token&gt;</code>。</p>')
 const DENY_PAGE = page('令牌无效', '<h2>🚫 令牌无效</h2>')
 const LIMITED_PAGE = page('请稍后再试', '<h2>⏳ 尝试过于频繁</h2><p class="muted">一分钟后再试。</p>')
+const NO_SESSION_PAGE = page('会话未建立',
+  '<h2>⚠️ dsh 会话未建立</h2><p class="muted">启动令牌缺失或已失效。用 start.bat 重启，或用新的登录链接进入。</p>')
 
 function sendPage(res, status, html) {
   res.writeHead(status, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' })
@@ -410,43 +460,18 @@ function forward(req, res) {
   const upHeaders = cleanHeaders(req)
   // drip 路径已按 200 提交、无法再声明 content-encoding，强制上游回 identity
   if (isDrip) delete upHeaders['accept-encoding']
-  const upstream = http.request({
-    host: TARGET_HOST, port: TARGET_PORT,
-    method: req.method, path: req.url,
-    headers: upHeaders,
-  }, (upRes) => {
-    stopHeartbeat()
-    // dsh 0.2+ 浏览器会话认证桥接（见文件上方说明）：导航请求被上游 401，说明这台设备
-    // 还没换过 Cookie、Cookie 过期了、或 dsh 换了签名密钥。把它引到带一次性启动令牌的
-    // 根路径，dsh 种好 Cookie 后 303 回 `./`（= 应用首页）。drip 已按 200 提交响应头时
-    // 无法再改状态码，只能放弃重定向（此时客户端看到的是 dsh 的 401 正文）。
-    if (!dripCommitted && upRes.statusCode === 401 && isNavRequest(req) && !hasTokenParam(req.url)) {
-      const tok = dshLaunchToken()
-      if (tok !== '') {
-        stopDrip()
-        upRes.resume()
-        res.writeHead(302, {
-          'Location': '/?token=' + encodeURIComponent(tok),
-          'Cache-Control': 'no-store',
-          'Referrer-Policy': 'no-referrer',
-        })
-        res.end('')
-        return
-      }
-      warnNoDshToken()
-    }
-    if (dripCommitted) {
-      stopDrip()
-      // 已按 200 提交：真实状态码无法传达，只能力保正文送达（见上方机制 2 的代价说明）
-      if (upRes.statusCode !== 200) {
-        console.log(`commands/execute 迟到的 HTTP ${upRes.statusCode} 已无法传达，客户端按 200 收到正文`)
-      }
-      upRes.pipe(res)
-      upRes.on('error', () => { try { res.end() } catch { } })
-      return
-    }
+  // 只重放无请求体的导航请求（重放时 body 已被第一次 dispatch 消费掉）
+  const canRetry = !isDrip && (req.method === 'GET' || req.method === 'HEAD')
+
+  // 回写上游响应。dsh 的会话 Cookie 不下发给浏览器——它由网关独占（见文件上方说明）
+  function relay(upRes) {
     stopDrip()
     const h = { ...upRes.headers }
+    if (h['set-cookie'] !== undefined) {
+      const kept = [].concat(h['set-cookie']).filter((c) => !String(c).startsWith(DSH_COOKIE_PREFIX))
+      if (kept.length > 0) h['set-cookie'] = kept
+      else delete h['set-cookie']
+    }
     const ct = String(h['content-type'] || '')
     const ce = String(h['content-encoding'] || '')
     const isHtml = ct.includes('text/html') && (!ce || ce === 'identity')
@@ -491,18 +516,67 @@ function forward(req, res) {
       res.end(body)
     })
     upRes.on('error', () => { try { res.end() } catch { } })
-  })
-  upstream.on('error', () => {
-    stopHeartbeat()
-    stopDrip()
-    try {
-      if (!res.headersSent) res.writeHead(502, { 'Content-Type': 'text/plain; charset=utf-8' })
-      res.end('Bad Gateway: DSH Web UI 不可达，请确认 dsh web 已启动')
-    } catch { }
-  })
-  res.on('close', () => { stopHeartbeat(); stopDrip(); try { upstream.destroy() } catch { } })
+  }
+
+  function dispatch(headers, replay) {
+    const upstream = http.request({
+      host: TARGET_HOST, port: TARGET_PORT,
+      method: req.method, path: req.url,
+      headers,
+    }, (upRes) => {
+      stopHeartbeat()
+      if (dripCommitted) {
+        stopDrip()
+        // 已按 200 提交：真实状态码无法传达，只能力保正文送达（见上方机制 2 的代价说明）
+        if (upRes.statusCode !== 200) {
+          console.log(`commands/execute 迟到的 HTTP ${upRes.statusCode} 已无法传达，客户端按 200 收到正文`)
+        }
+        upRes.pipe(res)
+        upRes.on('error', () => { try { res.end() } catch { } })
+        return
+      }
+      // 导航请求被 dsh 401：网关自己也没有可用 Cookie（首次、或缓存被 dsh 拒绝）。现场
+      // 换一份再原样重放这次请求——浏览器完全不知情，因此不可能出现重定向环。
+      // 重放仍 401 就明说，不再重试。
+      if (upRes.statusCode === 401 && isNavRequest(req) && (canRetry || replay)) {
+        upRes.resume()
+        stopDrip()
+        if (!replay) {
+          // 本次带上去的就是缓存那份 → 它已被 dsh 拒绝，必须强制重换；否则缓存里已经是
+          // 更新的（并发时别的请求刚换过），直接用它重放即可，别重复换
+          const cur = freshDshCookie()
+          const stale = cur === '' || String(headers.cookie || '').includes(cur)
+          mintDshCookie(stale).then((pair) => {
+            if (pair === '') { warnNoDshToken(); sendPage(res, 401, NO_SESSION_PAGE); return }
+            dispatch(cleanHeaders(req), true)
+          }).catch(() => sendPage(res, 401, NO_SESSION_PAGE))
+          return
+        }
+        warnNoDshToken()
+        sendPage(res, 401, NO_SESSION_PAGE)
+        return
+      }
+      relay(upRes)
+    })
+    upstream.on('error', (err) => {
+      stopHeartbeat()
+      stopDrip()
+      if (res.destroyed || res.writableEnded) return // 客户端已放弃，别拿日志刷屏
+      console.error('转发失败: ' + (err && err.message))
+      try {
+        if (!res.headersSent) res.writeHead(502, { 'Content-Type': 'text/plain; charset=utf-8' })
+        res.end('Bad Gateway: DSH Web UI 不可达，请确认 dsh web 已启动')
+      } catch { }
+    })
+    res.on('close', () => { stopHeartbeat(); stopDrip(); try { upstream.destroy() } catch { } })
+    // 重放没有请求体（只对 GET/HEAD 重放），必须显式 end() 才会发出去
+    if (replay) upstream.end()
+    else req.pipe(upstream)
+    return upstream
+  }
+
   req.on('data', (c) => meterUp(c.length))
-  req.pipe(upstream)
+  dispatch(upHeaders, false)
 }
 
 // ---- 认证 ------------------------------------------------------------------------
@@ -518,12 +592,10 @@ const server = http.createServer((req, res) => {
     if (failLimited()) { sendPage(res, 429, LIMITED_PAGE); return }
     if (!tokenEq(ticket, TOKEN)) { noteFail(); sendPage(res, 403, DENY_PAGE); return }
     const secure = (FORCE_HTTPS || req.headers['x-forwarded-proto'] === 'https') ? '; Secure' : ''
-    // 首次登录顺手把 dsh 的启动令牌带上，省掉「先 401 再重定向」的一次往返；令牌只在这一跳
-    // 的 Location 里出现，dsh 会立刻 303 到干净 URL，并自带 Referrer-Policy: no-referrer。
-    // 拿不到令牌时退回 `/`，由 forward() 的 401 桥接兜底。
-    const tok = dshLaunchToken()
+    // 顺手预热 dsh 会话 Cookie，下一跳就不用等 401 再换。不 await：换不到也不影响登录。
+    mintDshCookie().catch(() => { })
     res.writeHead(302, {
-      'Location': tok ? '/?token=' + encodeURIComponent(tok) : '/',
+      'Location': '/',
       'Set-Cookie': COOKIE_NAME + '=' + TOKEN + '; Path=/; HttpOnly; SameSite=Lax; Max-Age=31536000' + secure,
       'Cache-Control': 'no-store',
       'Referrer-Policy': 'no-referrer',

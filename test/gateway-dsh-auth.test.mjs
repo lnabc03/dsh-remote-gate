@@ -1,11 +1,16 @@
 // dsh >= 0.2 自带浏览器会话认证的桥接测试。
 //
 // 背景：dsh 0.2 起 `dsh web` 自己对 `/` 与 `/api` 认证——没有 `dsh-auth-*` Cookie 一律 401，
-// 「把 Host 改写成 127.0.0.1:3080 就等价于本机浏览器」不再成立。网关的桥接方式是：导航请求
-// 被 401 时，把浏览器引到带一次性启动令牌的根路径，由 dsh 种 Cookie 后 303 回应用。
+// 「把 Host 改写成 127.0.0.1:3080 就等价于本机浏览器」不再成立。
 //
-// mock 上游复刻了 dsh 的真实语义（令牌换 Cookie / Cookie 放行 / 其余 401），因此这里跑的是
-// 「远端设备首次登录」的完整链路，而不只是单个响应码。
+// 网关的做法：**会话 Cookie 由网关自己持有**，用启动令牌换一次（缓存 10 分钟）后在转发时
+// 换上，浏览器的同名 Cookie 一律丢弃、dsh 回的同名 Set-Cookie 一律不下发。
+//
+// 曾经的做法（401 → 把浏览器重定向到 /?token=… → dsh 种 Cookie → 303 回 /）在 iPhone 上
+// 会无限打转「重定向次数过多」：WebKit 对跨站发起的导航链不送 SameSite=Strict Cookie，
+// 而 dsh 只认同名 Cookie 的第一份。所以下面每个用例都断言「没有 Location」。
+//
+// mock 复刻了 dsh 的真实语义（令牌换 Cookie / Cookie 放行 / 其余 401 / 只认同名第一份）。
 import { test, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import http from 'node:http'
@@ -19,13 +24,15 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const GATEWAY = path.join(__dirname, '..', 'gateway.mjs')
 
 const TOKEN = 'test-token-' + Math.random().toString(36).slice(2)
-const DSH_TOKEN = 'launch-' + Math.random().toString(36).slice(2)
 const GATE_PORT = 37000 + Math.floor(Math.random() * 4000)
 const UP_PORT = GATE_PORT + 5001
 const TOKEN_FILE = path.join(os.tmpdir(), 'dsh-gate-auth-' + GATE_PORT)
 
 const HTML_PAGE = '<!doctype html><html><head><title>dsh</title>' +
   '<link rel="manifest" href="./manifest.webmanifest" /></head><body>app</body></html>'
+
+// mock 侧状态：accepted = dsh 认可的会话值；清空它等价于 dsh 换了签名密钥
+const state = { seq: 0, accepted: new Set(), validToken: 'launch-' + Math.random().toString(36).slice(2), exchanges: [] }
 
 let upstream, gate
 
@@ -36,29 +43,36 @@ function listen(server, port) {
   })
 }
 
-// 复刻 dsh 0.2 的认证语义：
-//   GET /?token=<启动令牌>      → 303 ./ + Set-Cookie dsh-auth-*（一次性交换）
-//   带 dsh-auth-* Cookie 的请求 → 200
-//   其余                        → 401 "dsh web authentication required"
+const cookieHeader = (value) =>
+  `dsh-auth-abc=${value}; Max-Age=2592000; Path=/; HttpOnly; SameSite=Strict`
+
 function mockDsh(req, res) {
   const url = new URL(req.url, 'http://dsh.invalid')
-  const hasCookie = /(?:^|;\s*)dsh-auth-/.test(String(req.headers.cookie || ''))
-  if (req.method === 'GET' && url.pathname === '/' && url.searchParams.get('token') === DSH_TOKEN) {
-    res.writeHead(303, {
-      'Location': './',
-      'Set-Cookie': 'dsh-auth-abc=v1.sig; Max-Age=2592000; Path=/; HttpOnly; SameSite=Strict',
-      'Referrer-Policy': 'no-referrer',
-    })
-    res.end()
-    return
+  const tok = url.searchParams.get('token')
+  if (req.method === 'GET' && url.pathname === '/' && tok !== null) {
+    state.exchanges.push(tok)
+    if (tok === state.validToken) {
+      const value = 'v1.' + (++state.seq)
+      state.accepted.add(value)
+      res.writeHead(303, { 'Location': './', 'Set-Cookie': cookieHeader(value), 'Referrer-Policy': 'no-referrer' })
+      res.end()
+      return
+    }
+    // 令牌不对：与真实 dsh 一致——401，且不种 Cookie
   }
-  if (hasCookie) {
+  // 只认同名 Cookie 的第一份（真实 dsh 实测行为）
+  const first = /(?:^|;\s*)dsh-auth-abc=([^;]*)/.exec(String(req.headers.cookie || ''))
+  if (first && state.accepted.has(first[1])) {
     if (url.pathname.startsWith('/api/')) {
       res.writeHead(200, { 'Content-Type': 'application/json' })
       res.end('{"ok":true}')
       return
     }
-    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
+    res.writeHead(200, {
+      'Content-Type': 'text/html; charset=utf-8',
+      // dsh 会顺带刷新会话 Cookie；网关必须把它挡在浏览器之外，其余 Set-Cookie 照常透传
+      'Set-Cookie': [cookieHeader(first[1]), 'theme=dark; Path=/'],
+    })
     res.end(HTML_PAGE)
     return
   }
@@ -66,29 +80,32 @@ function mockDsh(req, res) {
   res.end('dsh web authentication required; reopen the URL printed by dsh web.\n')
 }
 
-before(async () => {
-  upstream = http.createServer(mockDsh)
-  await listen(upstream, UP_PORT)
-  fs.writeFileSync(TOKEN_FILE, DSH_TOKEN + '\n')
-
-  gate = spawn(process.execPath, [GATEWAY], {
+function startGateway(port, tokenFile) {
+  const proc = spawn(process.execPath, [GATEWAY], {
     env: {
       ...process.env,
       DSH_GATE_TOKEN: TOKEN,
-      DSH_GATE_PORT: String(GATE_PORT),
+      DSH_GATE_PORT: String(port),
       DSH_GATE_TARGET_PORT: String(UP_PORT),
       DSH_GATE_BIND: '127.0.0.1',
-      DSH_GATE_DSH_TOKEN_FILE: TOKEN_FILE,
+      DSH_GATE_DSH_TOKEN_FILE: tokenFile,
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   })
-  let out = ''
-  await new Promise((resolve, reject) => {
-    gate.stdout.on('data', (d) => { out += d; if (out.includes('listening')) resolve() })
-    gate.stderr.on('data', (d) => { out += d })
-    gate.on('exit', (code) => reject(new Error('gateway exited early: ' + code + '\n' + out)))
+  return new Promise((resolve, reject) => {
+    let out = ''
+    proc.stdout.on('data', (d) => { out += d; if (out.includes('listening')) resolve(proc) })
+    proc.stderr.on('data', (d) => { out += d })
+    proc.on('exit', (code) => reject(new Error('gateway exited early: ' + code + '\n' + out)))
     setTimeout(() => reject(new Error('gateway listen timeout\n' + out)), 8000)
   })
+}
+
+before(async () => {
+  upstream = http.createServer(mockDsh)
+  await listen(upstream, UP_PORT)
+  fs.writeFileSync(TOKEN_FILE, state.validToken + '\n')
+  gate = await startGateway(GATE_PORT, TOKEN_FILE)
 })
 
 after(() => {
@@ -99,119 +116,108 @@ after(() => {
 
 const base = () => `http://127.0.0.1:${GATE_PORT}`
 const NAV = { Accept: 'text/html,application/xhtml+xml' }
+const setCookies = (res) => (typeof res.headers.getSetCookie === 'function' ? res.headers.getSetCookie() : [])
 
-test('登录 302 的 Location 直接带上 dsh 启动令牌（省掉一次 401 往返）', async () => {
+async function loginCookie() {
+  const res = await fetch(base() + '/?t=' + encodeURIComponent(TOKEN), { redirect: 'manual' })
+  return (res.headers.get('set-cookie') || '').split(';')[0]
+}
+
+test('登录 302 到干净的 /：地址栏里不出现 dsh 启动令牌', async () => {
   const res = await fetch(base() + '/?t=' + encodeURIComponent(TOKEN), { redirect: 'manual' })
   assert.equal(res.status, 302)
-  assert.equal(res.headers.get('location'), '/?token=' + DSH_TOKEN)
-  // 令牌出现在这一跳的 URL 里，禁止外泄给任何第三方
-  assert.equal(res.headers.get('referrer-policy'), 'no-referrer')
+  assert.equal(res.headers.get('location'), '/')
+  assert.match(res.headers.get('set-cookie'), /^dg_token=/)
 })
 
-test('完整链路：登录 → 令牌换 Cookie → 应用可用（manifest 仍被注入）', async () => {
-  // 1) 网关登录，拿 dg_token，并被引向带 dsh 令牌的根路径
-  const login = await fetch(base() + '/?t=' + encodeURIComponent(TOKEN), { redirect: 'manual' })
-  const dgCookie = (login.headers.get('set-cookie') || '').split(';')[0]
-  assert.match(dgCookie, /^dg_token=/)
-  const mintUrl = login.headers.get('location')
-  assert.equal(mintUrl, '/?token=' + DSH_TOKEN)
-
-  // 2) 用 dg_token 打开带令牌的根路径 → dsh 种 Cookie 并 303 回 ./
-  const mint = await fetch(base() + mintUrl, { headers: { ...NAV, Cookie: dgCookie }, redirect: 'manual' })
-  assert.equal(mint.status, 303)
-  assert.equal(mint.headers.get('location'), './')
-  const dshCookie = (mint.headers.get('set-cookie') || '').split(';')[0]
-  assert.match(dshCookie, /^dsh-auth-/, 'dsh 的 Set-Cookie 必须原样穿过网关')
-
-  // 3) 带两个 Cookie 访问应用 → 200 + 网关注入的 manifest 排在 dsh 自带的前面
-  const app = await fetch(base() + '/', { headers: { ...NAV, Cookie: `${dgCookie}; ${dshCookie}` } })
-  assert.equal(app.status, 200)
-  const body = await app.text()
+test('冷启动导航：网关自换 Cookie 后重放，一次就 200（全程无重定向）', async () => {
+  const dgCookie = await loginCookie()
+  const res = await fetch(base() + '/', { headers: { ...NAV, Cookie: dgCookie }, redirect: 'manual' })
+  assert.equal(res.status, 200)
+  assert.equal(res.headers.get('location'), null, '导航不能靠重定向去换 Cookie')
+  const body = await res.text()
+  // 注入仍在：manifest 必须排在 dsh 自带的前面
   assert.match(body, /<link rel="manifest" href="\/pwa\/manifest\.json">/)
   assert.ok(body.indexOf('/pwa/manifest.json') < body.indexOf('./manifest.webmanifest'))
 })
 
-test('无 Cookie 的导航请求被 dsh 401 → 网关重定向去换 Cookie（而不是把 401 甩给用户）', async () => {
-  const dgCookie = (await loginCookie())
-  const res = await fetch(base() + '/', {
-    headers: { ...NAV, Cookie: dgCookie },
-    redirect: 'manual',
-  })
-  assert.equal(res.status, 302)
-  assert.equal(res.headers.get('location'), '/?token=' + DSH_TOKEN)
-  assert.equal(res.headers.get('referrer-policy'), 'no-referrer')
+test('dsh 的会话 Cookie 不下发给浏览器，其它 Set-Cookie 照常透传', async () => {
+  const dgCookie = await loginCookie()
+  const res = await fetch(base() + '/', { headers: { ...NAV, Cookie: dgCookie } })
+  assert.equal(res.status, 200)
+  const sc = setCookies(res)
+  assert.ok(!sc.some((s) => s.startsWith('dsh-auth-')), 'dsh-auth-* 必须被网关拦下')
+  assert.ok(sc.some((s) => s.startsWith('theme=dark')), '非 dsh 的 Cookie 要原样透传')
 })
 
-test('已带 token= 仍被 401（令牌失效）→ 原样透传 401，不再重定向（防重定向环）', async () => {
+test('浏览器残留同名旧 Cookie 也照样 200（dsh 只认同名第一份）', async () => {
   const dgCookie = await loginCookie()
-  const res = await fetch(base() + '/?token=stale-token', {
-    headers: { ...NAV, Cookie: dgCookie },
-    redirect: 'manual',
-  })
-  assert.equal(res.status, 401)
-  assert.equal(res.headers.get('location'), null)
-  assert.match(await res.text(), /authentication required/)
+  // 故意把坏值放在前面：若网关把客户端 Cookie 透传上去，dsh 会 401
+  const res = await fetch(base() + '/', { headers: { ...NAV, Cookie: `dsh-auth-abc=v1.garbage; ${dgCookie}` } })
+  assert.equal(res.status, 200)
 })
 
-test('非导航请求（XHR/fetch）401 不重定向——前端要的是状态码，不是一段 HTML', async () => {
+test('缓存被 dsh 拒绝（换了签名密钥）→ 强制重换一次并恢复', async () => {
   const dgCookie = await loginCookie()
+  assert.equal((await fetch(base() + '/', { headers: { ...NAV, Cookie: dgCookie } })).status, 200)
+  state.accepted.clear() // 模拟 dsh 侧签名密钥变化：缓存那份失效
+  const after = await fetch(base() + '/', { headers: { ...NAV, Cookie: dgCookie }, redirect: 'manual' })
+  assert.equal(after.status, 200, '缓存失效后应自动重换，而不是把 401 甩给用户')
+  assert.equal(after.headers.get('location'), null)
+})
+
+test('dsh 重启换了启动令牌：网关按 mtime 懒读新值，无需重启网关', async () => {
+  const dgCookie = await loginCookie()
+  state.accepted.clear()
+  state.validToken = 'launch-rotated-' + Math.random().toString(36).slice(2)
+  fs.writeFileSync(TOKEN_FILE, state.validToken + '\n')
+  const future = new Date(Date.now() + 4000) // 部分文件系统 mtime 粒度 1s，且网关侧有 1s stat 节流
+  fs.utimesSync(TOKEN_FILE, future, future)
+  await new Promise((r) => setTimeout(r, 1200))
+  const before = state.exchanges.length
+  const res = await fetch(base() + '/', { headers: { ...NAV, Cookie: dgCookie }, redirect: 'manual' })
+  assert.equal(res.status, 200)
+  assert.equal(state.exchanges.length - before, 1, '只需换一次')
+  assert.equal(state.exchanges.at(-1), state.validToken, '必须用文件里的新令牌')
+})
+
+test('并发冷启动：多个导航同时 401 只换一次 Cookie', async () => {
+  const dgCookie = await loginCookie()
+  state.accepted.clear()
+  const before = state.exchanges.length
+  const all = await Promise.all([1, 2, 3, 4, 5].map(
+    () => fetch(base() + '/', { headers: { ...NAV, Cookie: dgCookie } })))
+  assert.deepEqual(all.map((r) => r.status), [200, 200, 200, 200, 200])
+  assert.equal(state.exchanges.length - before, 1)
+})
+
+test('XHR（非导航）401 不注入页面、不重定向——前端要的是状态码', async () => {
+  const dgCookie = await loginCookie()
+  state.accepted.clear()
+  state.validToken = '' // 换不到 Cookie
   const res = await fetch(base() + '/api/anything', {
     headers: { Cookie: dgCookie, Accept: 'application/json' },
     redirect: 'manual',
   })
   assert.equal(res.status, 401)
   assert.equal(res.headers.get('location'), null)
+  assert.match(await res.text(), /authentication required/)
+  state.validToken = 'launch-' + Math.random().toString(36).slice(2)
 })
 
-test('dsh 重启换了启动令牌：网关按 mtime 懒读新值，无需重启网关', async () => {
-  const next = 'launch-rotated-' + Math.random().toString(36).slice(2)
-  fs.writeFileSync(TOKEN_FILE, next + '\n')
-  // 让 mtime 明确变化（部分文件系统 mtime 粒度 1s，且网关侧有 1s stat 节流）
-  const future = new Date(Date.now() + 4000)
-  fs.utimesSync(TOKEN_FILE, future, future)
-  await new Promise((r) => setTimeout(r, 1200))
-  const res = await fetch(base() + '/?t=' + encodeURIComponent(TOKEN), { redirect: 'manual' })
-  assert.equal(res.status, 302)
-  assert.equal(res.headers.get('location'), '/?token=' + next)
-})
-
-test('令牌文件缺失（外部启动的 dsh）→ 退回旧的 401 透传行为，不重定向', async () => {
-  // 独立网关实例：指向一个不存在的令牌文件，验证「拿不到令牌」时的降级路径
+test('拿不到启动令牌（外部启动的 dsh）→ 明确页面，而不是重定向环', async () => {
   const port = GATE_PORT + 777
-  const other = spawn(process.execPath, [GATEWAY], {
-    env: {
-      ...process.env,
-      DSH_GATE_TOKEN: TOKEN,
-      DSH_GATE_PORT: String(port),
-      DSH_GATE_TARGET_PORT: String(UP_PORT),
-      DSH_GATE_BIND: '127.0.0.1',
-      DSH_GATE_DSH_TOKEN_FILE: path.join(os.tmpdir(), 'dsh-gate-absent-' + port),
-    },
-    stdio: ['ignore', 'pipe', 'pipe'],
-  })
+  const other = await startGateway(port, path.join(os.tmpdir(), 'dsh-gate-absent-' + port))
   try {
-    let out = ''
-    await new Promise((resolve, reject) => {
-      other.stdout.on('data', (d) => { out += d; if (out.includes('listening')) resolve() })
-      other.stderr.on('data', (d) => { out += d })
-      other.on('exit', (code) => reject(new Error('gateway exited early: ' + code + '\n' + out)))
-      setTimeout(() => reject(new Error('gateway listen timeout\n' + out)), 8000)
-    })
     const b = `http://127.0.0.1:${port}`
-    // 登录 Location 退回干净的 `/`
     const login = await fetch(b + '/?t=' + encodeURIComponent(TOKEN), { redirect: 'manual' })
     assert.equal(login.headers.get('location'), '/')
     const dgCookie = (login.headers.get('set-cookie') || '').split(';')[0]
-    // 导航 401 原样透传
     const res = await fetch(b + '/', { headers: { ...NAV, Cookie: dgCookie }, redirect: 'manual' })
     assert.equal(res.status, 401)
     assert.equal(res.headers.get('location'), null)
+    assert.match(await res.text(), /令牌缺失或已失效/)
   } finally {
     try { other.kill() } catch { }
   }
 })
-
-async function loginCookie() {
-  const res = await fetch(base() + '/?t=' + encodeURIComponent(TOKEN), { redirect: 'manual' })
-  return (res.headers.get('set-cookie') || '').split(';')[0]
-}

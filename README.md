@@ -110,11 +110,11 @@ proxy_send_timeout 600s;
 | env | `DSH_GATE_DRIP_GRACE_MS` / `DSH_GATE_DRIP_MS` | `20000` / `25000` | drip（仅 `/api/commands/execute`）宽限期 / 滴包间隔；宽限期 0 关闭 |
 | env | `DSH_GATE_DSH_TOKEN` / `DSH_GATE_DSH_TOKEN_FILE` | 自动 / `.dsh-web-token` | dsh 启动令牌。`npm start` 会自动从 dsh 输出抓取并落盘，**一般不用管**；只有「dsh 由你自己另开、网关单独跑」时才需要手动指定 |
 
-> **dsh 版本要求：≥ 0.2**。dsh 0.2 给 `dsh web` 加了自带的浏览器会话认证，网关必须桥接它的启动令牌（`npm start` 自动完成）。详见 [`AGENTS.md`](AGENTS.md) 约束 12 与 [`PITFALLS.md`](PITFALLS.md) §4。
+> **dsh 版本要求：≥ 0.2**。dsh 0.2 给 `dsh web` 加了自带的浏览器会话认证，网关自己用它的启动令牌换一份会话 Cookie 并缓存（`npm start` 自动完成，浏览器不参与）。详见 [`AGENTS.md`](AGENTS.md) 约束 12 与 [`PITFALLS.md`](PITFALLS.md) §4。
 
 ## 安全模型
 
-- **对 DSH 隐形**：`Host` 重写为 `127.0.0.1:3080`，`Origin` 重写为本机源（**不能丢弃**，dsh 生态插件的 same-origin 校验要求它与 Host 一致），丢弃 `Referer`/`X-Forwarded-*` 等，网关 Cookie 不上行——上游看来与本机浏览器完全不可区分。dsh ≥ 0.2 还要求出示它自己的 `dsh-auth-*` 会话 Cookie，由网关从 dsh 启动令牌换取（见上表 `DSH_GATE_DSH_TOKEN`）。
+- **对 DSH 隐形**：`Host` 重写为 `127.0.0.1:3080`，`Origin` 重写为本机源（**不能丢弃**，dsh 生态插件的 same-origin 校验要求它与 Host 一致），丢弃 `Referer`/`X-Forwarded-*` 等，网关 Cookie 不上行——上游看来与本机浏览器完全不可区分。dsh ≥ 0.2 还要求出示它自己的 `dsh-auth-*` 会话 Cookie：由网关用启动令牌换好、连同请求一起送上去，**不下发给任何客户端**（见上表 `DSH_GATE_DSH_TOKEN`）。
 - **对公网**：攻击面只有令牌登录一处。令牌 192 bit 随机、timing-safe 比较；Cookie `HttpOnly + SameSite=Lax`，HTTPS 下自动 `Secure`；错误令牌全局 30 次/分钟软限流（不依赖 IP——隧道拓扑下 IP 逻辑无效，见 [`PITFALLS.md`](PITFALLS.md) §4）。`/pwa/*` 静态资产豁免认证（iOS 装图标不带 Cookie）。
 - **lan 模式**：HTTP 明文，令牌与流量同网可嗅探；防火墙是唯一网络边界（只放行「专用网络」）。
 - **cf 模式**：TLS 在 CF 边缘终止，明文对 CF 可见；quick tunnel 官方定位测试用途，无 SLA；登录链接不要发给不可信方。
