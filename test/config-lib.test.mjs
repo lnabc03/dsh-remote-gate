@@ -7,7 +7,7 @@ import path from 'node:path'
 import {
   loadConfig, saveConfigAtomic, ensureToken, newToken,
   migrateFrpIntoConfig, validatePanelConfig, isConfigured,
-  preflightForMode, applyPanelConfig,
+  preflightForMode, applyPanelConfig, syncFrpcToml,
 } from '../config-lib.mjs'
 
 function tmpdir() {
@@ -134,6 +134,30 @@ test('applyPanelConfig：frp 模式同时重生成 frpc.toml', () => {
   const dir2 = tmpdir()
   applyPanelConfig({ mode: 'lan' }, { configPath: path.join(dir2, 'config.json'), frpcPath: path.join(dir2, 'frpc.toml') })
   assert.equal(fs.existsSync(path.join(dir2, 'frpc.toml')), false)
+})
+
+test('syncFrpcToml：启动时把产物对齐到 config.json（手改 config.json 也能生效）', () => {
+  const dir = tmpdir()
+  const frpcPath = path.join(dir, 'frpc.toml')
+
+  // 首次：文件不存在 → 生成
+  const cfg = { mode: 'frp', frp: { serverAddr: '203.0.113.20', serverPort: 7000, authToken: 'tok-a' } }
+  assert.equal(syncFrpcToml(cfg, { frpcPath }), frpcPath)
+  assert.match(fs.readFileSync(frpcPath, 'utf8'), /serverAddr = "203\.0\.113\.20"/)
+
+  // 内容没变 → 不写盘（返回 null，避免每次启动都碰磁盘）
+  assert.equal(syncFrpcToml(cfg, { frpcPath }), null)
+
+  // 换了服务器（只改 config.json）→ 产物必须跟上
+  const moved = { mode: 'frp', frp: { ...cfg.frp, serverAddr: '203.0.113.21' } }
+  assert.equal(syncFrpcToml(moved, { frpcPath }), frpcPath)
+  const toml = fs.readFileSync(frpcPath, 'utf8')
+  assert.match(toml, /serverAddr = "203\.0\.113\.21"/)
+  assert.doesNotMatch(toml, /203\.0\.113\.20/)
+
+  // 非 frp 模式 / 缺 frp 字段 → 返回 null，不生成
+  assert.equal(syncFrpcToml({ mode: 'lan' }, { frpcPath }), null)
+  assert.equal(syncFrpcToml({ mode: 'frp' }, { frpcPath }), null)
 })
 
 test('preflightForMode：frp/cf 缺二进制给 hint，lan/ssh 直接过', () => {

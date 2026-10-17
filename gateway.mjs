@@ -47,6 +47,61 @@ const FORCE_HTTPS = fileCfg.mode === 'cf'
 const COOKIE_NAME = 'dg_token'
 const HTML_LIMIT = 4 * 1024 * 1024
 
+// ---- dsh 自带浏览器会话认证的桥接（dsh >= 0.2） --------------------------------
+// dsh 0.2 起 `dsh web` 自己对 `/` 与 `/api` 做认证：启动时打印一次性 `?token=<启动令牌>`，
+// 拿它访问根路径才换来 `dsh-auth-*` 签名 Cookie（HttpOnly + SameSite=Strict，受众=请求
+// Host 的 authority）。没有这个 Cookie，网关转发出去的每一个请求都会被 dsh 401 挡下——
+// 「把 Host 改写成 127.0.0.1:3080 就能冒充本机」不再成立，因为本机浏览器同样得先出示 Cookie。
+//
+// 好消息是整合成本很低：网关把 Host **固定**重写成 127.0.0.1:3080，所以
+//   - Cookie 名（sha256(authority)）与受众对所有远端设备、所有隧道模式都是同一个值；
+//   - 签名密钥存在 dsh 的 credentials 里（持久），Cookie 能跨 dsh 重启继续有效（默认 30 天）；
+//   - 只有启动令牌每次进程都变，且只用于「换 Cookie」这一次交换。
+// 所以网关只需要在「导航请求被 401」时把浏览器引到带启动令牌的根路径，让 dsh 种好 Cookie
+// 再 303 回应用；之后一切照旧。启动令牌由 start.mjs 从 dsh 的 stdout 抓取后写进
+// DSH_TOKEN_FILE（每次 dsh 启动重写），网关按 mtime 懒读，dsh 重启换令牌也无需重启网关。
+const DSH_TOKEN_FILE = process.env.DSH_GATE_DSH_TOKEN_FILE || path.join(__dirname, '.dsh-web-token')
+const DSH_TOKEN_FILE_TTL = 1000 // stat 节流：每秒最多查一次 mtime
+let dshTok = { value: process.env.DSH_GATE_DSH_TOKEN || '', mtime: -1, at: 0 }
+
+function dshLaunchToken() {
+  if (process.env.DSH_GATE_DSH_TOKEN) return process.env.DSH_GATE_DSH_TOKEN
+  const now = Date.now()
+  if (now - dshTok.at < DSH_TOKEN_FILE_TTL) return dshTok.value
+  dshTok.at = now
+  try {
+    const st = fs.statSync(DSH_TOKEN_FILE)
+    if (st.mtimeMs !== dshTok.mtime) {
+      dshTok.mtime = st.mtimeMs
+      dshTok.value = fs.readFileSync(DSH_TOKEN_FILE, 'utf8').trim()
+    }
+  } catch {
+    dshTok.value = ''
+    dshTok.mtime = -1
+  }
+  return dshTok.value
+}
+
+// 导航请求：浏览器地址栏/书签/主屏图标发起的、会渲染成页面的请求。只有这类请求值得
+// 重定向去换 Cookie；XHR/fetch（/api、/assets）拿到 401 就该原样回给前端，不能把它
+// 重定向成一段 HTML。
+function isNavRequest(req) {
+  return String(req.headers.accept || '').includes('text/html')
+}
+
+// 串里已带 token= 就不再重试——否则启动令牌失效时会自己重定向自己，形成重定向环
+function hasTokenParam(url) {
+  return /[?&]token=/.test(String(url || ''))
+}
+
+let noTokenWarnedAt = 0
+function warnNoDshToken() {
+  const now = Date.now()
+  if (now - noTokenWarnedAt < 60_000) return
+  noTokenWarnedAt = now
+  console.log('未取得 dsh 启动令牌，远端导航会 401；用 npm start 拉起 dsh，或设 DSH_GATE_DSH_TOKEN')
+}
+
 // ---- helpers ----------------------------------------------------------------
 function parseCookies(req) {
   const out = {}
@@ -124,7 +179,7 @@ function cleanHeaders(req) {
   const drop = new Set(['host', 'origin', 'referer', 'connection', 'keep-alive', 'te', 'trailer',
     'transfer-encoding', 'upgrade', 'proxy-connection', 'proxy-authorization', 'proxy-authenticate',
     'forwarded', 'x-real-ip'])
-  const isNav = String(req.headers.accept || '').includes('text/html')
+  const isNav = isNavRequest(req)
   const out = {}
   for (const k in req.headers) {
     const lk = k.toLowerCase()
@@ -194,9 +249,9 @@ function page(title, body) {
     '</head><body><div class="card">' + body + '</div></body></html>'
 }
 
-const UNAUTH_PAGE = page('未授权', '<h2>🔒 DSH Mobile Gate</h2><p class="muted">此网关需要访问令牌。<br>请在首次访问的 URL 中携带 <code>?t=&lt;token&gt;</code>。</p>')
-const DENY_PAGE = page('令牌无效', '<h2>🚫 令牌无效</h2><p class="muted">请检查令牌是否正确。</p>')
-const LIMITED_PAGE = page('请稍后再试', '<h2>⏳ 尝试过于频繁</h2><p class="muted">请一分钟后再试。</p>')
+const UNAUTH_PAGE = page('未授权', '<h2>🔒 DSH Remote Gate</h2><p class="muted">首次访问需带 <code>?t=&lt;token&gt;</code>。</p>')
+const DENY_PAGE = page('令牌无效', '<h2>🚫 令牌无效</h2>')
+const LIMITED_PAGE = page('请稍后再试', '<h2>⏳ 尝试过于频繁</h2><p class="muted">一分钟后再试。</p>')
 
 function sendPage(res, status, html) {
   res.writeHead(status, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' })
@@ -361,11 +416,30 @@ function forward(req, res) {
     headers: upHeaders,
   }, (upRes) => {
     stopHeartbeat()
+    // dsh 0.2+ 浏览器会话认证桥接（见文件上方说明）：导航请求被上游 401，说明这台设备
+    // 还没换过 Cookie、Cookie 过期了、或 dsh 换了签名密钥。把它引到带一次性启动令牌的
+    // 根路径，dsh 种好 Cookie 后 303 回 `./`（= 应用首页）。drip 已按 200 提交响应头时
+    // 无法再改状态码，只能放弃重定向（此时客户端看到的是 dsh 的 401 正文）。
+    if (!dripCommitted && upRes.statusCode === 401 && isNavRequest(req) && !hasTokenParam(req.url)) {
+      const tok = dshLaunchToken()
+      if (tok !== '') {
+        stopDrip()
+        upRes.resume()
+        res.writeHead(302, {
+          'Location': '/?token=' + encodeURIComponent(tok),
+          'Cache-Control': 'no-store',
+          'Referrer-Policy': 'no-referrer',
+        })
+        res.end('')
+        return
+      }
+      warnNoDshToken()
+    }
     if (dripCommitted) {
       stopDrip()
       // 已按 200 提交：真实状态码无法传达，只能力保正文送达（见上方机制 2 的代价说明）
       if (upRes.statusCode !== 200) {
-        console.log(`[gate] commands/execute 宽限期后上游才回 HTTP ${upRes.statusCode}，客户端已按 200 接收正文`)
+        console.log(`commands/execute 迟到的 HTTP ${upRes.statusCode} 已无法传达，客户端按 200 收到正文`)
       }
       upRes.pipe(res)
       upRes.on('error', () => { try { res.end() } catch { } })
@@ -444,10 +518,15 @@ const server = http.createServer((req, res) => {
     if (failLimited()) { sendPage(res, 429, LIMITED_PAGE); return }
     if (!tokenEq(ticket, TOKEN)) { noteFail(); sendPage(res, 403, DENY_PAGE); return }
     const secure = (FORCE_HTTPS || req.headers['x-forwarded-proto'] === 'https') ? '; Secure' : ''
+    // 首次登录顺手把 dsh 的启动令牌带上，省掉「先 401 再重定向」的一次往返；令牌只在这一跳
+    // 的 Location 里出现，dsh 会立刻 303 到干净 URL，并自带 Referrer-Policy: no-referrer。
+    // 拿不到令牌时退回 `/`，由 forward() 的 401 桥接兜底。
+    const tok = dshLaunchToken()
     res.writeHead(302, {
-      'Location': '/',
+      'Location': tok ? '/?token=' + encodeURIComponent(tok) : '/',
       'Set-Cookie': COOKIE_NAME + '=' + TOKEN + '; Path=/; HttpOnly; SameSite=Lax; Max-Age=31536000' + secure,
       'Cache-Control': 'no-store',
+      'Referrer-Policy': 'no-referrer',
     })
     res.end('')
     return
@@ -491,17 +570,33 @@ server.on('upgrade', (req, socket, head) => {
   socket.on('close', kill); upstream.on('close', kill)
 })
 
+server.on('error', (err) => {
+  // EADDRINUSE 是最常见的启动失败：上一次的网关没退出干净（关掉面板窗口不会停栈；
+  // 控制台被异常结束时也可能留下 node 子进程），于是端口一直被占。默认行为是 Node
+  // 抛一个 Unhandled 'error' 堆栈，被 start.mjs 当成「意外崩溃」直接团灭，用户只能看到
+  // 一屏看不懂的 at Server.setupListenHandle —— 这里换成能照着做的两行，并用退出码 2
+  // 让 start.mjs 区分「环境残留」与真正的崩溃。
+  if (err && err.code === 'EADDRINUSE') {
+    // 不打 `[gate] ` 前缀：由 start.mjs 的日志标签统一加；单独跑 gateway.mjs 时这段文案本身已点明
+    console.error(`端口 ${BIND_HOST}:${PORT} 已被占用（多半是上一次的网关还在跑）`)
+    console.error(`结束占用者后重试：netstat -ano | findstr :${PORT}   taskkill /PID <PID> /T /F`)
+    process.exit(2)
+  }
+  console.error(`监听 ${BIND_HOST}:${PORT} 失败: ${err && err.message ? err.message : err}`)
+  process.exit(1)
+})
+
 server.listen(PORT, BIND_HOST, () => {
   console.log(`listening on ${BIND_HOST}:${PORT} -> ${TARGET_HOST}:${TARGET_PORT}`)
   if (BIND_HOST === '0.0.0.0') {
     lanIp().then((ip) => {
       console.log(`登录链接: http://${ip || '<本机局域网IP>'}:${PORT}/?t=${TOKEN}`)
       const alts = lanCandidates().filter((a) => a !== ip && !a.startsWith('169.254.'))
-      if (alts.length > 0) console.log(`备用 IP: ${alts.join(' / ')}（打不开时替换链接里的 IP 再试）`)
+      if (alts.length > 0) console.log(`备用 IP: ${alts.join(' / ')}`)
     })
   } else if (FORCE_HTTPS) {
     // cf 模式：域名由 cloudflared 每次启动随机分配，网关无从得知，登录链接由 start.mjs 抓 URL 后打印
-    console.log('登录链接: 由 cloudflared 分配临时域名，见启动器 [start] 输出')
+    console.log('登录链接见 [start] 输出（cloudflared 临时域名）')
   } else {
     console.log(`登录链接: https://${DOMAIN || '<你的域名>'}/?t=${TOKEN}`)
   }

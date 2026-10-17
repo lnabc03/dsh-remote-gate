@@ -4,12 +4,11 @@
 const $ = (sel) => document.querySelector(sel)
 const $$ = (sel) => Array.from(document.querySelectorAll(sel))
 
-const MODE_NAMES = { frp: 'frp', ssh: 'ssh', lan: 'lan', cf: 'cf' }
 const MODE_DESCS = {
-  frp: '自有服务器中转，稳定，有服务器时首选',
-  ssh: '复用服务器 sshd，免装 frps，断线自动重拨',
-  lan: '同一局域网直连，零配置，明文 HTTP',
-  cf: 'Cloudflare 临时隧道，零服务器，域名每次随机',
+  frp: '自有服务器中转，稳定',
+  ssh: '复用 sshd，免装 frps；断线自动重拨',
+  lan: '同网直连，零配置；明文 HTTP',
+  cf: 'CF 临时隧道，零服务器；域名每次随机',
 }
 
 // ---- API 封装 ------------------------------------------------------------------
@@ -22,6 +21,10 @@ async function api(path, opts = {}) {
 }
 
 // ---- 状态灯 + 登录链接 + 二维码 -----------------------------------------------------
+// 「打开 DSH 页面」要用的地址，由 /api/status 下发：dsh 0.2 起裸开 127.0.0.1:3080 会 401，
+// 必须带上一次性启动令牌（`?token=`）才会种好会话 Cookie。拿不到令牌时退回裸地址。
+let dshUrl = 'http://127.0.0.1:3080'
+
 function setLight(id, state) { // 'on' | 'off' | 'na'
   const el = $(id)
   el.classList.remove('on', 'off', 'na')
@@ -29,6 +32,7 @@ function setLight(id, state) { // 'on' | 'off' | 'na'
 }
 
 function renderStatus(s) {
+  if (s.dshUrl) dshUrl = s.dshUrl
   const mode = s.mode || '未配置'
   const badge = $('#modeBadge')
   badge.textContent = s.configured ? `模式: ${mode}` : '未配置'
@@ -44,22 +48,22 @@ function renderStatus(s) {
   const row = $('#loginRow')
   const canvas = $('#qrCanvas')
   if (s.login) {
-    hint.textContent = '手机扫码或点开链接即可登录。链接内含令牌，勿外发。'
+    hint.textContent = '扫码或点开链接登录；链接含令牌，勿外发。'
     const a = $('#loginLink')
     a.textContent = s.login
     a.href = s.login
     row.classList.remove('hidden')
     renderQr(s.login)
   } else if (!s.configured) {
-    hint.textContent = '尚未配置访问模式，请先完成配置并保存。'
+    hint.textContent = '尚未配置访问模式。'
     row.classList.add('hidden')
     canvas.classList.add('hidden')
   } else if (s.cfPending) {
-    hint.textContent = 'cloudflared 正在分配临时域名，几秒后自动出现…'
+    hint.textContent = 'cloudflared 分配域名中…'
     row.classList.add('hidden')
     canvas.classList.add('hidden')
   } else {
-    hint.textContent = '登录链接暂不可用：网关或隧道未运行。'
+    hint.textContent = '网关或隧道未运行。'
     row.classList.add('hidden')
     canvas.classList.add('hidden')
   }
@@ -179,12 +183,12 @@ async function saveConfig(ev) {
     const r = await api('/api/config', { method: 'POST', body: JSON.stringify(collectPayload()) })
     if (r.ok) {
       msg.classList.add('ok')
-      msg.textContent = r.newToken ? '已保存并重启；令牌已轮换，旧登录态全部失效' : '已保存，网关与隧道重启中…'
+      msg.textContent = r.newToken ? '已保存并重启；令牌已轮换，旧登录态失效' : '已保存，重启中…'
       setTimeout(refreshAll, 1200) // 重新拉取配置刷新表单，含轮换后的新令牌
     } else {
       const extra = showErrors(r.errors)
       msg.classList.add('err')
-      msg.textContent = extra.length ? extra.join('；') : '保存失败，请检查标红字段'
+      msg.textContent = extra.length ? extra.join('；') : '保存失败，检查标红字段'
     }
   } catch (err) {
     msg.classList.add('err')
@@ -201,7 +205,7 @@ function rotateToken() {
   const b64 = btoa(String.fromCharCode(...bytes)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
   $('[name="token"]').value = b64
   $('#saveMsg').className = 'save-msg'
-  $('#saveMsg').textContent = '已生成新令牌，点「保存并重启」后生效'
+  $('#saveMsg').textContent = '已生成，保存后生效'
 }
 
 // ---- 操作按钮 ----------------------------------------------------------------------
@@ -290,7 +294,7 @@ function boot() {
   $$('input[name="mode"]').forEach((r) => r.addEventListener('change', syncModeSections))
   $('#rotateBtn').addEventListener('click', rotateToken)
   $('#restartDshBtn').addEventListener('click', restartDsh)
-  $('#openDshBtn').addEventListener('click', () => window.open('http://127.0.0.1:3080', '_blank', 'noopener'))
+  $('#openDshBtn').addEventListener('click', () => window.open(dshUrl, '_blank', 'noopener'))
   $('#copyBtn').addEventListener('click', async () => {
     const text = $('#loginLink').textContent
     try {

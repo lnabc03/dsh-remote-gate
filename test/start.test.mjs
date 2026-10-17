@@ -5,7 +5,7 @@ import { spawn } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
-import { shouldIgnoreLine, FRPC_IGNORE, CF_IGNORE, CF_IGNORE_RE, extractCfUrl, waitExit, panelWindowSize, panelProfileDir, clearSavedWindowPlacement, formatCrash, samePath } from '../start.mjs'
+import { shouldIgnoreLine, FRPC_IGNORE, CF_IGNORE, CF_IGNORE_RE, extractCfUrl, waitExit, panelWindowSize, panelProfileDir, clearSavedWindowPlacement, formatCrash, samePath, extractDshLaunchToken, rememberTail, formatFatalNote, dshPageUrl } from '../start.mjs'
 
 test('shouldIgnoreLine：frpc 的 pool-full 告警被过滤', () => {
   const noisy = '2026-08-17 00:38:19 [E] [client/control.go:153] StartWorkConn contains error: work connection pool is full, discarding'
@@ -41,6 +41,16 @@ test('extractCfUrl：从 cloudflared 边框行抓出临时域名', () => {
   assert.equal(extractCfUrl(CF_BOX[0]), null)
   assert.equal(extractCfUrl('2026-01-01T00:00:00Z INF Registered tunnel connection connIndex=0'), null)
   assert.equal(extractCfUrl(''), null)
+})
+
+test('extractDshLaunchToken：抓 dsh web 打印的一次性启动令牌', () => {  // dsh 0.2 实际输出格式（带 LAN 尾巴；令牌是 base64url）
+  const withLan = 'dsh web: http://127.0.0.1:3080/?token=z29di-8HrOLvtzDAVjJq7Hvx-e3mJbwemhqwjLoIzOE (LAN: http://192.168.1.5:3080/?token=z29di-8HrOLvtzDAVjJq7Hvx-e3mJbwemhqwjLoIzOE)'
+  assert.equal(extractDshLaunchToken(withLan), 'z29di-8HrOLvtzDAVjJq7Hvx-e3mJbwemhqwjLoIzOE')
+  assert.equal(extractDshLaunchToken('dsh web: http://127.0.0.1:3080/?token=abc_DEF-123'), 'abc_DEF-123')
+  // 不能误抓网关自己的 ?t= 登录链接，也不能抓别的日志行
+  assert.equal(extractDshLaunchToken('登录链接: https://dsh.example.com/?t=gateway-token'), null)
+  assert.equal(extractDshLaunchToken('dsh web: opening the default browser; pass --no-open to disable'), null)
+  assert.equal(extractDshLaunchToken(''), null)
 })
 
 test('shouldIgnoreLine：cloudflared 的公告/边框/URL 行被过滤（URL 由 start 自行打印）', () => {
@@ -189,4 +199,43 @@ test('samePath：同一文件的不同路径形态判等（联接点/大小写�
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true })
   }
+})
+
+// 隧道致命退出（frpc/cloudflared 退出 = 团灭）会把控制台一起关掉，用户只看到「闪退」。
+// 这两条保证「关掉窗口之后仍然查得到原因」。
+test('rememberTail：只收 frpc/cf，剥掉 ANSI，且只留最近 20 行', () => {
+  const ansi = '\u001b[1;34m2026-10-18 [I] token mismatch\u001b[0m'
+  const buf = rememberTail('frpc', ansi)
+  assert.deepEqual(buf, ['2026-10-18 [I] token mismatch']) // ANSI 必须剥掉，否则落盘全是色码
+  assert.equal(rememberTail('gate', 'should be ignored'), undefined) // 只关心隧道
+  assert.equal(rememberTail('dsh', 'should be ignored'), undefined)
+  assert.deepEqual(rememberTail('frpc', 'LAST').slice(-1), ['LAST'])
+
+  for (let i = 0; i < 30; i++) rememberTail('cf', 'line-' + i)
+  const cf = rememberTail('cf', 'line-final')
+  assert.equal(cf.length, 20, '缓冲区上限 20 行')
+  assert.equal(cf[cf.length - 1], 'line-final')
+  assert.ok(!cf.includes('line-0'), '最早的输出应已被挤出')
+})
+
+test('formatFatalNote：含来源、原因与尾部输出，尾部为空时不加分隔行', () => {
+  const withTail = formatFatalNote('frpc 意外退出（团灭）', 'code=1 signal=null', ['a', 'b'], '2026-01-01T00:00:00Z', 'v1', 'win32')
+  assert.match(withTail, /^\[2026-01-01T00:00:00Z\] frpc 意外退出（团灭） \(node v1, win32\)/)
+  assert.match(withTail, /code=1 signal=null/)
+  assert.match(withTail, /--- 最近输出 ---/)
+  assert.match(withTail, /a\nb/)
+
+  const noTail = formatFatalNote('x', 'y', [], 'NOW', 'v', 'p')
+  assert.doesNotMatch(noTail, /--- 最近输出 ---/)
+  assert.ok(noTail.endsWith('\n\n'))
+})
+
+// 面板的「打开 DSH 页面」按钮：dsh 0.2 起裸开 127.0.0.1:3080 会 401（约束 12），
+// 必须带一次性启动令牌换 Cookie，所以 URL 由 /api/status 下发而不是前端硬编码。
+test('dshPageUrl：有令牌带 ?token=，无令牌退回裸地址', () => {
+  assert.equal(dshPageUrl(3080, 'abc-123_x'), 'http://127.0.0.1:3080/?token=abc-123_x')
+  // 令牌是小写+数字+连字符/下划线，不该被转义；但真出现特殊字符时必须编码
+  assert.equal(dshPageUrl(3080, null), 'http://127.0.0.1:3080/')
+  assert.equal(dshPageUrl(3080, ''), 'http://127.0.0.1:3080/')
+  assert.match(dshPageUrl(3080, 'a b&c'), /\?token=a%20b%26c$/)
 })

@@ -96,6 +96,9 @@ before(async () => {
       // 加速 drip 宽限/滴答（生产默认 20s/25s）
       DSH_GATE_DRIP_GRACE_MS: '120',
       DSH_GATE_DRIP_MS: '80',
+      // 指向一个不存在的令牌文件：本套测试验证「无 dsh 启动令牌」的既有行为，
+      // 不能被仓库里真实运行时留下的 .dsh-web-token 污染（dsh 认证桥接另有一套测试）
+      DSH_GATE_DSH_TOKEN_FILE: path.join(os.tmpdir(), 'dsh-gate-no-such-token-' + GATE_PORT),
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   })
@@ -419,4 +422,31 @@ test('lan 模式：网关绑 0.0.0.0 并打印局域网登录链接', async () =
     try { gate.kill() } catch { }
     try { fs.unlinkSync(tmp) } catch { }
   }
+})
+
+test('端口被占 → 退出码 2 + 能照着做的提示（不是一屏 Node 堆栈）', async () => {
+  // 复现「上一次的网关没退出干净」：在同一个端口再起一个网关
+  const dup = spawn(process.execPath, [GATEWAY], {
+    env: {
+      ...process.env,
+      DSH_GATE_TOKEN: TOKEN,
+      DSH_GATE_PORT: String(GATE_PORT), // ← 已被上面的网关占着
+      DSH_GATE_TARGET_PORT: String(UP_PORT),
+      DSH_GATE_BIND: '127.0.0.1',
+      DSH_GATE_DSH_TOKEN_FILE: path.join(os.tmpdir(), 'dsh-gate-no-such-token-' + GATE_PORT),
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  let out = ''
+  const code = await new Promise((resolve, reject) => {
+    dup.stdout.on('data', (d) => { out += d })
+    dup.stderr.on('data', (d) => { out += d })
+    dup.on('error', reject)
+    dup.on('exit', (c) => resolve(c))
+    setTimeout(() => { try { dup.kill() } catch { } resolve('timeout') }, 8000)
+  })
+  assert.equal(code, 2, 'EADDRINUSE 必须用退出码 2，start.mjs 靠它区分环境残留与真崩溃')
+  assert.match(out, /已被占用/)
+  assert.match(out, /netstat -ano/) // 给出可照做的排查命令
+  assert.doesNotMatch(out, /at Server\.setupListenHandle/) // 不再是原始堆栈
 })

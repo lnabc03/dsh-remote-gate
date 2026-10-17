@@ -184,7 +184,20 @@ export function preflightForMode(mode, root = ROOT) {
 // 落盘：config.json 原子写 + frp 模式全量重生成 frpc.toml（产物，非数据源）
 export function applyPanelConfig(config, { configPath = CONFIG_PATH, frpcPath = FRPC_PATH } = {}) {
   saveConfigAtomic(config, configPath)
-  if (normalizeMode(config.mode) === 'frp' && config.frp) {
-    fs.writeFileSync(frpcPath, renderFrpcToml(config.frp), { mode: 0o600 })
-  }
+  syncFrpcToml(config, { frpcPath })
+}
+
+// 只重生成 frpc.toml（不动 config.json）。供启动时调用：config.json 是唯一数据源，
+// 产物必须在每次启动都跟上它。否则手改 config.json 里 frp 的地址/端口/令牌不会生效，
+// 而 frpc 连不上又会让整栈团灭、面板来不及打开——用户就被锁在「改了没生效、
+// 面板又进不去」的死循环里（换服务器踩过）。
+// @returns {string|null} 写入的路径；非 frp 模式或缺 frp 字段时返回 null
+export function syncFrpcToml(config, { frpcPath = FRPC_PATH } = {}) {
+  if (normalizeMode(config.mode) !== 'frp' || !config.frp) return null
+  const next = renderFrpcToml(config.frp)
+  let prev = null
+  try { prev = fs.readFileSync(frpcPath, 'utf8') } catch { /* 首次启动没有该文件 */ }
+  if (prev === next) return null // 内容没变就别碰磁盘
+  fs.writeFileSync(frpcPath, next, { mode: 0o600 })
+  return frpcPath
 }

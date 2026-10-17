@@ -104,14 +104,17 @@ proxy_send_timeout 600s;
 | `config.json` | `frp.serverAddr` / `.serverPort` / `.authToken` | — | frp 模式专用（唯一数据源） |
 | `config.json` | `ssh.host` / `.port` / `.user` / `.keyPath` | — | ssh 模式专用 |
 | env | `DSH_GATE_PORT` / `DSH_GATE_BIND` / `DSH_GATE_TARGET_PORT` | `3088` / 按模式 / `3080` | 覆盖对应 config 项；`BIND` 缺省：lan → `0.0.0.0`，其余 → `127.0.0.1` |
-| env | `DSH_GATE_TOKEN` / `DSH_GATE_DOMAIN` / `DSH_GATE_CONFIG` | — | 覆盖令牌 / 域名 / 配置文件路径 |
+| env | `DSH_GATE_TOKEN` / `DSH_GATE_DOMAIN` / `DSH_GATE_CONFIG` | — | 覆盖令牌 / 域名 / 配置文件路径（**`DSH_GATE_CONFIG` 只作用于网关进程**；`start.mjs` 与控制面板固定读写仓库内 `config.json`，给启动器换配置会导致面板与网关各看一个文件） |
 | env | `DSH_GATE_PANEL_PORT` / `DSH_GATE_PANEL_WINSIZE` / `DSH_GATE_NO_OPEN` | `3089` / `1440x860` / — | 面板端口（占用自动递增）/ `--app` 窗口尺寸 / 置 1 不自动打开面板 |
 | env | `DSH_GATE_HEARTBEAT_MS` | `25000` | 非 WebKit 客户端的慢路径 102 心跳间隔；0 关闭；WebKit 自动豁免 |
 | env | `DSH_GATE_DRIP_GRACE_MS` / `DSH_GATE_DRIP_MS` | `20000` / `25000` | drip（仅 `/api/commands/execute`）宽限期 / 滴包间隔；宽限期 0 关闭 |
+| env | `DSH_GATE_DSH_TOKEN` / `DSH_GATE_DSH_TOKEN_FILE` | 自动 / `.dsh-web-token` | dsh 启动令牌。`npm start` 会自动从 dsh 输出抓取并落盘，**一般不用管**；只有「dsh 由你自己另开、网关单独跑」时才需要手动指定 |
+
+> **dsh 版本要求：≥ 0.2**。dsh 0.2 给 `dsh web` 加了自带的浏览器会话认证，网关必须桥接它的启动令牌（`npm start` 自动完成）。详见 [`AGENTS.md`](AGENTS.md) 约束 12 与 [`PITFALLS.md`](PITFALLS.md) §4。
 
 ## 安全模型
 
-- **对 DSH 隐形**：`Host` 重写为 `127.0.0.1:3080`，丢弃 `Origin`/`Referer`/`X-Forwarded-*` 等，网关 Cookie 不上行——上游看来与本机浏览器完全不可区分。
+- **对 DSH 隐形**：`Host` 重写为 `127.0.0.1:3080`，`Origin` 重写为本机源（**不能丢弃**，dsh 生态插件的 same-origin 校验要求它与 Host 一致），丢弃 `Referer`/`X-Forwarded-*` 等，网关 Cookie 不上行——上游看来与本机浏览器完全不可区分。dsh ≥ 0.2 还要求出示它自己的 `dsh-auth-*` 会话 Cookie，由网关从 dsh 启动令牌换取（见上表 `DSH_GATE_DSH_TOKEN`）。
 - **对公网**：攻击面只有令牌登录一处。令牌 192 bit 随机、timing-safe 比较；Cookie `HttpOnly + SameSite=Lax`，HTTPS 下自动 `Secure`；错误令牌全局 30 次/分钟软限流（不依赖 IP——隧道拓扑下 IP 逻辑无效，见 [`PITFALLS.md`](PITFALLS.md) §4）。`/pwa/*` 静态资产豁免认证（iOS 装图标不带 Cookie）。
 - **lan 模式**：HTTP 明文，令牌与流量同网可嗅探；防火墙是唯一网络边界（只放行「专用网络」）。
 - **cf 模式**：TLS 在 CF 边缘终止，明文对 CF 可见；quick tunnel 官方定位测试用途，无 SLA；登录链接不要发给不可信方。
@@ -134,10 +137,9 @@ npm test   # 87 项：mock 上游 + 网关/面板/配置库/补丁锚点/看门�
 | `watchdog.mjs` | 面板看门狗：控制台意外死亡时自动关闭面板窗口 |
 | `admin.mjs` + `admin/` | 本地控制面板（QR 库、字体、图标均 vendored 于 `admin/vendor/`） |
 | `config-lib.mjs` / `setup.mjs` | 配置读写校验 / 隧道参数构造纯函数库 |
-| `patch-dsh.mjs` | 幂等补丁 DSH client-runtime（修提问弹窗、断帧修复改增量合并省流量） |
 | `pwa/` | manifest、最小 service worker、图标 |
 | `frp/` / `cf/` | frpc 模板 / cloudflared 放置目录 |
-| `test/` | 六组自动化测试 |
+| `test/` | 自动化测试（`npm test`） |
 
 ## 致谢
 

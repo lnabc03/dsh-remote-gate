@@ -10,7 +10,7 @@
 </head>
 <body>
 
-<div id="offlineBar" class="offline-bar hidden">与启动器失去连接（控制台可能已退出），正在重连… 若长时间未恢复，本窗口可手动关闭</div>
+<div id="offlineBar" class="offline-bar hidden">与启动器断开，正在重连…</div>
 
 <header class="topbar">
   <div class="brand">
@@ -47,7 +47,7 @@
         <button id="openDshBtn" type="button" class="btn">打开 DSH 页面</button>
         <button id="restartDshBtn" type="button" class="btn danger">重启 dsh</button>
       </div>
-      <p class="muted">重启 dsh 会中断正在运行的 agent 会话。</p>
+      <p class="muted">重启 dsh 会中断 agent 会话。</p>
     </section>
   </aside>
 
@@ -93,8 +93,8 @@
         <p class="field-err" data-err="domain"></p></div>
       </fieldset>
 
-      <p class="mode-note hidden" id="noteLan">lan 模式：网关绑 0.0.0.0，同网设备直接访问。明文 HTTP，仅建议可信网络。首次启动若弹防火墙提示请点「允许」。</p>
-      <p class="mode-note hidden" id="noteCf">cf 模式：域名每次启动随机分配，重启即换。100s 无响应会被 CF 切断，超长命令请换 frp 或 ssh。</p>
+      <p class="mode-note hidden" id="noteLan">网关绑 0.0.0.0，同网直连；明文 HTTP，仅限可信网络。防火墙弹窗选「允许」。</p>
+      <p class="mode-note hidden" id="noteCf">域名每次启动随机；100s 无响应会被 CF 切断，长命令改用 frp 或 ssh。</p>
 
       <fieldset>
         <legend>网关令牌</legend>
@@ -103,14 +103,14 @@
           <button id="rotateBtn" type="button" class="btn small">重新生成</button>
         </div>
         <p class="field-err" data-err="token"></p>
-        <p class="muted">轮换后所有旧登录态立即失效，需用新链接重新登录。</p>
+        <p class="muted">轮换后旧登录态立即失效，需用新链接重登。</p>
       </fieldset>
 
       <div class="form-actions">
-        <button id="saveBtn" type="submit" class="btn primary">保存并重启网关+隧道</button>
+        <button id="saveBtn" type="submit" class="btn primary">保存并重启</button>
         <span id="saveMsg" class="save-msg"></span>
       </div>
-      <p class="muted">保存只重启网关与隧道，dsh 会话不受影响。</p>
+      <p class="muted">只重启网关与隧道，dsh 会话不受影响。</p>
     </form>
   </section>
 

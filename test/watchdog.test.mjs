@@ -8,6 +8,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 import { fileURLToPath } from 'node:url'
+import { killPanelBrowser, panelPidFile } from '../watchdog.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const WATCHDOG = path.join(__dirname, '..', 'watchdog.mjs')
@@ -77,4 +78,27 @@ test('父进程存活 → 看门狗不动任何进程', async (t) => {
   // 收尾：杀父后看门狗应退出（同时会顺带关掉 victim，属预期行为）
   parent.kill('SIGTERM')
   assert.ok(await waitExit(wd), '看门狗应在父死后退出')
+})
+
+// 之前 killPanelBrowser 只有「按命令行枚举」一条通道，靠 Get-CimInstance Win32_Process。
+// 本机实测 WMI 会整片报错（HRESULT 0x80004005，连试 8 次全失败），查询一抛错就被 catch
+// 吞掉 → 什么都不杀也不报错 → 面板 --app 窗口永久残留。本用例只造 pid 记录、**故意**
+// 让命令行里不含 profile 路径，从而只可能走 pid 通道。
+test('killPanelBrowser：按记录的 pid 关窗（不依赖 WMI 命令行枚举）', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'dg-pid-'))
+  const profileDir = path.join(root, 'panel-profile') // 真实布局：pid 文件是 profile 的兄弟
+  fs.mkdirSync(profileDir)
+  const victim = spawnLong()   // 命令行里没有 profile 路径 → 命令行通道命中不了
+  const bystander = spawnLong()
+  fs.writeFileSync(panelPidFile(profileDir), String(victim.pid))
+  t.after(() => {
+    for (const p of [victim, bystander]) { try { p.kill('SIGKILL') } catch { } }
+    fs.rmSync(root, { recursive: true, force: true })
+  })
+
+  assert.ok(alive(victim.pid), 'victim 应先在跑')
+  await killPanelBrowser(profileDir)
+  for (let i = 0; i < 40 && alive(victim.pid); i++) await sleep(250)
+  assert.ok(!alive(victim.pid), '按 pid 记录应能关掉面板浏览器')
+  assert.ok(alive(bystander.pid), '无关进程不得被误杀')
 })

@@ -68,7 +68,7 @@ const UNAUTH_PAGE = '<!doctype html><html lang="zh-CN"><head><meta charset="utf-
   'background:#0b0c0f;color:#e7e9ee;font:16px/1.6 system-ui,sans-serif}' +
   '.card{max-width:22rem;padding:2rem;text-align:center}.muted{color:#9aa1ad;font-size:.9em}</style>' +
   '</head><body><div class="card"><h2>DSH Remote Gate 控制面板</h2>' +
-  '<p class="muted">面板仅能从本机启动器打开。<br>若令牌已轮换，请回到启动器窗口复制新链接，或重新运行 <code>npm start</code>。</p>' +
+  '<p class="muted">需从启动器打开。<br>令牌已轮换则回启动器复制新链接，或重跑 <code>npm start</code>。</p>' +
   '</div></body></html>'
 
 // 子进程输出常带 ANSI 颜色转义（frpc/cloudflared），面板日志是纯文本，进缓冲前剥掉

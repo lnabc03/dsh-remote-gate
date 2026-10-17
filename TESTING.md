@@ -1,12 +1,12 @@
 # 手动端到端测试清单
 
 > 本清单覆盖 **SSH 反向隧道**、**LAN 局域网直连**、**CF 临时隧道** 与 **本地控制面板** 的真实环境验证（前两者已真机实测基本可用；cf 已实测基本可用，细项待观察；面板已实现待实测）。
-> 纯逻辑已由自动化测试覆盖（`npm test`，当前 87 项）；本清单只列必须要有真实服务器 / 真机 / 真网络才能验的项，逐条打勾即可。
+> 纯逻辑已由自动化测试覆盖（`npm test`，当前 97 项）；本清单只列必须要有真实服务器 / 真机 / 真网络才能验的项，逐条打勾即可。
 
 ## 0. 基线（每次开始前）
 
-- [x] `npm test` 全绿（87/87）
-- [x] `git status` 干净，无 `config.json` / `frp/frpc.toml` / `.dsh-usage-stats.json` 泄漏
+- [x] `npm test` 全绿（99/99）
+- [x] `git status` 干净，无 `config.json` / `frp/frpc.toml` / `.dsh-usage-stats.json` / `.dsh-web-token` 泄漏
 
 ---
 
@@ -122,7 +122,13 @@
 ### 4.1 启动与鉴权
 
 - [ ] `npm start` → 自动弹出 Chrome/Edge `--app=` 应用窗口（无地址栏、独立任务栏图标）；无 Chrome/Edge 时回退默认浏览器标签页
+- [ ] 面板窗口**真的显示出来**且渲染出界面（不是只剩一片暗色底）；**不应该**出现任何「无标题、暗色、没有按钮、不在任务栏」的第二个窗口——那是 Edge 的账户同步通知弹窗（`--disable-sync --no-service-autorun` 没带上，或被 `windowsHide` 弄成了首个窗口隐藏）
 - [ ] 双击 `start.bat`：bat 窗口一闪即关，node 控制台（PowerShell 宿主，pwsh 优先 / powershell 回退）**最小化在任务栏**（不消失），可见窗口只有面板一个；点开最小化控制台能看到全部日志
+- [ ] 任务栏那个最小化窗口的标题是 **`dsh-remote-gate`**，不是「Windows PowerShell」（认不出名字 = `process.title` 那行被删了）
+- [ ] 只关掉面板窗口再双击 `start.bat`：新实例应打印「端口 3088 已被占用 + netstat/taskkill 提示」并干净退出，**不是**一屏 `EADDRINUSE` Node 堆栈；按提示结束旧进程后正常启动
+- [ ] 撞端口那次**不应弹出任何面板窗口**（注定失败的实例开窗前已被 1.2s 守卫拦下）；已有的另一个实例的面板窗口也不得被它关掉
+- [ ] Ctrl+C 退出后：面板窗口**立即消失**，任务管理器里没有残留的 `msedge`（面板专用 profile）与 `node`；`netstat -ano | findstr :3088` 为空
+- [ ] `%LOCALAPPDATA%\dsh-remote-gate\panel-browser.pid` 存在且指向当前面板浏览器主进程（关窗靠它，WMI 坏了也能关）
 - [ ] 控制台里按回车：重新打开面板应用窗口（面板被误关后的找回口子）；**点击窗口后按一次回车即生效**（PowerShell 宿主禁用 QuickEdit，不再有点选冻结需按两次的问题）
 - [ ] 模拟控制台意外死亡（`taskkill /F /PID <node>` 或直接 X 掉控制台窗口）：数秒内面板应用窗口被看门狗自动关闭，不静默挂着；其余派生进程（dsh/网关/隧道）随控制台退出
 - [ ] Ctrl+C 正常退出：面板应用窗口随之一并关闭（不依赖看门狗）
@@ -157,12 +163,25 @@
 - [ ] lan → 面板选 ssh 保存：`config.json` 保留原 `ssh.*` / `domain`，直接可用，无需重填
 - [ ] lan → 面板选 frp 保存：frpc 正常拉起（frpc.toml 由 config.json 全量重生成），公网 PWA 恢复可安装
 - [ ] 任意模式 → 面板选 cf：写入 `mode:"cf"`，cloudflared 拉起并打印临时域名链接；切回 frp/ssh 后原配置无感恢复（子配置保留不删）
-- [ ] 老安装（frp 参数只在 frpc.toml、config.json 无 `frp` 字段）直接 `npm start`：启动日志出现「已将 frp/frpc.toml 的参数迁入 config.json」，之后改 frpc.toml 不再生效（它是产物）
+- [ ] 老安装（frp 参数只在 frpc.toml、config.json 无 `frp` 字段）直接 `npm start`：启动日志出现「已将 frp/frpc.toml 迁入 config.json」，之后改 frpc.toml 不再生效（它是产物）
 - [ ] 面板选非法模式无法提交（单选只有四项；接口层 `validatePanelConfig` 拒绝并有单测）
 
 ---
 
-## 6. 安全核对（跨模式）
+## 6. dsh ≥ 0.2 浏览器会话认证桥接（每次升级 dsh 后必验）
+
+> dsh 0.2 起 `dsh web` 自带认证，网关必须桥接启动令牌（AGENTS.md 约束 12）。这一节是升级 dsh 后最容易被打破的路径。
+
+- [ ] `npm start` 后控制台出现「已捕获 dsh 启动令牌」；仓库目录存在 `.dsh-web-token`（内容为 base64url，且 `git status` 看不到它）
+- [ ] 手机打开 `https://<域名>/?t=<token>`：**不出现** `dsh web authentication required` 字样，直接进 DSH 应用
+- [ ] 浏览器地址栏最终停在干净 URL（无 `?token=`），登录跳转过程中 `Referer` 不外泄会话
+- [ ] 首次进入后 F12 → Application → Cookies 能看到 `dg_token` 与 `dsh-auth-*` 两条
+- [ ] 手动删掉 `dsh-auth-*` 再刷新页面 → **自动重新登录**（不应停在 401 文本页）
+- [ ] 面板点「重启 dsh」后，用**另一台**没登录过的设备打开登录链接仍可进（新启动令牌被重新抓取；已登录设备不受影响）
+- [ ] 外部已运行的 dsh（自己开 `dsh web` 后再 `npm start`）：日志出现「外部 dsh 抓不到启动令牌」提示；此时远端会 401，属已知限制
+- [ ] 手动把 `.dsh-web-token` 改成废令牌 → 远端刷新得到 dsh 的 401 文本页而**不是无限重定向**
+
+## 7. 安全核对（跨模式）
 
 - [ ] 单令牌四模式共用：同一 `?t=` 在 frp / ssh / lan / cf 下都能登录（`config.json` 里是同一个 token）；面板登录用的也是它
 - [ ] lan：手机访问是 `http://`（地址栏无锁），登录 Cookie **不带** `Secure`（否则 HTTP 下登录态失效）
@@ -173,7 +192,7 @@
 
 ---
 
-## 7. 已知未覆盖项
+## 8. 已知未覆盖项
 
 - [x] ~~SSH 真实端到端~~ 已实测基本可用（稳定性略逊于 frp、流式输出略卡，属预期）；重连/断线细项仍可照 §1.5 过一遍
 - [x] ~~LAN 真实端到端~~ 已实测可用（热点环境：进页面、选工作区、改设置均正常）。校园网不可用系 AP 客户端隔离，属环境限制，不算缺陷；换网络环境后可照 §2 复验
