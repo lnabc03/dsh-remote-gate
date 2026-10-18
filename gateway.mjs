@@ -46,6 +46,7 @@ const BIND_HOST = process.env.DSH_GATE_BIND || (fileCfg.mode === 'lan' ? '0.0.0.
 const FORCE_HTTPS = fileCfg.mode === 'cf'
 const COOKIE_NAME = 'dg_token'
 const HTML_LIMIT = 4 * 1024 * 1024
+const DG_BUFFER_LIMIT = 32 * 1024 * 1024 // /plugins/ 下的 bundle 要整条缓冲才能改写（实测 10.7MB）
 
 // ---- dsh 自带浏览器会话认证的桥接（dsh >= 0.2） --------------------------------
 // dsh 0.2 起 `dsh web` 自己对 `/` 与 `/api` 做认证：启动时打印一次性 `?token=<启动令牌>`，
@@ -142,6 +143,77 @@ function mintDshCookie(force = false) {
   return p
 }
 
+// ---- 内联图片外链化（移动端首屏字节的主战场） ------------------------------------
+// dsh 的客户端插件会把大图以 base64 直接内联进 client.js：实测
+// `dsh-client-ui-settings-account` 一条 bundle 里就塞了 8 张 3993×2480 的引导截图，
+// base64 共 4.87MB，占整条 bundle（10.72MB）近一半，而 base64 的图片数据几乎不可压缩
+// （整条 gzip 后 5.35MB，其中图片占 ~4.5MB）。手机冷启动得整条拉完才能跑。
+//
+// 做法：把「够大的 data:image/…;base64」换成 `/dg-asset/<sha256 前 16 位>.<ext>`，
+// 字节落到 .dg-assets/ 由网关自己发（immutable）。于是
+//   - 该 bundle 过线体积 5.35MB → 1.43MB（gzip 后），首屏 JS 5.97MB → ~1.9MB；
+//   - 图片只在这个界面真的渲染时才取，通常一次都不取；
+//   - 文件名是图片内容的哈希，与 dsh 版本、我们的改写方案都无关 → 浏览器缓存与 SW 缓存
+//     永远指向同一份字节。
+// 小图标（< 1KB）保持内联，不值得为它多一次往返。
+const DG_ASSET_DIR = process.env.DSH_GATE_ASSET_DIR || path.join(__dirname, '.dg-assets')
+const DG_ASSET_RE = /data:image\/(png|jpeg|gif|webp|svg\+xml);base64,([A-Za-z0-9+/=]{2048,})/g
+const DG_ASSET_MAX_BYTES = 64 << 20 // 目录上限，启动时按 mtime 从旧到新删到线下
+const DG_ASSET_MIME = { png: 'image/png', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', svg: 'image/svg+xml' }
+
+// 返回改写后的 body，或 null（没改写）。落盘失败就保留内联——宁可多传几 MB 也不能坏
+function externalizeImages(body) {
+  if (body.indexOf('data:image/') < 0) return null
+  let hit = 0
+  const out = body.toString('utf8').replace(DG_ASSET_RE, (all, type, b64) => {
+    let data
+    try { data = Buffer.from(b64, 'base64') } catch { return all }
+    if (data.length < 1024) return all
+    const id = crypto.createHash('sha256').update(data).digest('hex').slice(0, 16)
+    const ext = type === 'svg+xml' ? 'svg' : type
+    const file = path.join(DG_ASSET_DIR, id + '.' + ext)
+    try {
+      if (!fs.existsSync(file)) {
+        fs.mkdirSync(DG_ASSET_DIR, { recursive: true })
+        fs.writeFileSync(file, data)
+      }
+    } catch { return all }
+    hit++
+    return '/dg-asset/' + id + '.' + ext
+  })
+  return hit === 0 ? null : Buffer.from(out, 'utf8')
+}
+
+function serveDgAsset(req, res) {
+  const m = /^\/dg-asset\/([0-9a-f]{16})\.([a-z]+)$/.exec(String(req.url).split('?')[0])
+  if (m === null || DG_ASSET_MIME[m[2]] === undefined) { res.writeHead(404); res.end('Not Found'); return }
+  fs.readFile(path.join(DG_ASSET_DIR, m[1] + '.' + m[2]), (err, data) => {
+    if (err) { res.writeHead(404); res.end('Not Found'); return }
+    res.writeHead(200, {
+      'Content-Type': DG_ASSET_MIME[m[2]],
+      'Content-Length': data.length,
+      'Cache-Control': 'public, max-age=31536000, immutable',
+    })
+    res.end(data)
+  })
+}
+
+// 启动时按 mtime 从旧到新删，把目录压到上限内（dsh 升级换 rev 后旧图会堆积）
+function pruneDgAssets() {
+  let files
+  try { files = fs.readdirSync(DG_ASSET_DIR) } catch { return }
+  try {
+    const st = files.map((f) => ({ f, s: fs.statSync(path.join(DG_ASSET_DIR, f)) }))
+      .sort((a, b) => a.s.mtimeMs - b.s.mtimeMs)
+    let total = st.reduce((a, x) => a + x.s.size, 0)
+    for (const x of st) {
+      if (total <= DG_ASSET_MAX_BYTES) break
+      fs.unlinkSync(path.join(DG_ASSET_DIR, x.f))
+      total -= x.s.size
+    }
+  } catch { }
+}
+
 // ---- helpers ----------------------------------------------------------------
 function parseCookies(req) {
   const out = {}
@@ -211,20 +283,22 @@ function lanIp() {
 //   origin——本机浏览器发 POST 本来就带这个 Origin，重写后才算「不可区分」）；
 //   仅当原始请求带 origin 时才重写，不带则不加（与本机浏览器行为一致）
 // - 丢弃 referer / x-forwarded-* / forwarded / x-real-ip
-// - accept-encoding 只在导航请求（Accept 含 text/html，可能返回 HTML 需要注入）上丢弃，
-//   强制未压缩以便注入；静态资源/API 放行压缩——全量摘除会让 JS bundle 以未压缩体积
-//   过隧道，流量翻好几倍（服务器按出站计费时这是最大的浪费源，实测半天近 1G）
-// - cookie 中剔除网关自己的 dg_token
+// - accept-encoding 只在两种请求上丢弃：① 导航请求（Accept 含 text/html，要注入 HTML）；
+//   ② `/plugins/` 下的客户端 bundle（要改写内联图片，压缩过就无法改）。其余放行压缩——
+//   全量摘除会让 JS bundle 以未压缩体积过隧道，流量翻好几倍（按出站计费时是最大浪费源，
+//   实测半天近 1G）
+// - cookie 中剔除网关自己的 dg_token，换成网关自持的 dsh 会话 Cookie
 function cleanHeaders(req) {
   const drop = new Set(['host', 'origin', 'referer', 'connection', 'keep-alive', 'te', 'trailer',
     'transfer-encoding', 'upgrade', 'proxy-connection', 'proxy-authorization', 'proxy-authenticate',
     'forwarded', 'x-real-ip'])
   const isNav = isNavRequest(req)
+  const isPlugin = String(req.url || '').startsWith('/plugins/')
   const out = {}
   for (const k in req.headers) {
     const lk = k.toLowerCase()
     if (drop.has(lk) || lk.startsWith('x-forwarded-')) continue
-    if (lk === 'accept-encoding' && isNav) continue
+    if (lk === 'accept-encoding' && (isNav || isPlugin)) continue
     if (lk === 'cookie') {
       const mint = freshDshCookie()
       const kept = String(req.headers[k]).split(';').map((p) => p.trim()).filter(Boolean)
@@ -332,8 +406,12 @@ function servePwa(req, res) {
       'Content-Type': MIME[path.extname(file).toLowerCase()] || 'application/octet-stream',
       'Cache-Control': 'public, max-age=3600',
     }
-    // sw.js 在 /pwa/ 下，默认作用域只有 /pwa/；要控制整站必须显式放宽
-    if (path.basename(file) === 'sw.js') headers['Service-Worker-Allowed'] = '/'
+    // sw.js 在 /pwa/ 下，默认作用域只有 /pwa/；要控制整站必须显式放宽。
+    // 另外它必须每次校验（浏览器更新检查愿走的缓存上限只有 24h），否则改了 SW 要等一天才生效
+    if (path.basename(file) === 'sw.js') {
+      headers['Service-Worker-Allowed'] = '/'
+      headers['Cache-Control'] = 'no-cache'
+    }
     res.writeHead(200, headers)
     res.end(data)
   })
@@ -457,6 +535,7 @@ function forward(req, res) {
     }, DRIP_GRACE_MS)
     dripTimer.unref?.()
   }
+  const isPlugin = String(req.url || '').startsWith('/plugins/')
   const upHeaders = cleanHeaders(req)
   // drip 路径已按 200 提交、无法再声明 content-encoding，强制上游回 identity
   if (isDrip) delete upHeaders['accept-encoding']
@@ -475,20 +554,25 @@ function forward(req, res) {
     const ct = String(h['content-type'] || '')
     const ce = String(h['content-encoding'] || '')
     const isHtml = ct.includes('text/html') && (!ce || ce === 'identity')
-    const mayGzip = !isHtml && clientGzip && upRes.statusCode === 200 &&
+    // 客户端 bundle：缓冲下来把内联大图换成 /dg-asset/（见文件上方说明）。上游已被自己的
+    // 压缩包装时无从改写，只能原样透传
+    const rewrite = isPlugin && /javascript/.test(ct) && (!ce || ce === 'identity') &&
+      upRes.statusCode === 200 && !ct.includes('text/event-stream')
+    const mayGzip = !isHtml && !rewrite && clientGzip && upRes.statusCode === 200 &&
       (!ce || ce === 'identity') && GZIP_TYPE.test(ct) && !ct.includes('text/event-stream')
-    if (!isHtml && !mayGzip) {
+    if (!isHtml && !mayGzip && !rewrite) {
       res.writeHead(upRes.statusCode || 502, h)
       upRes.pipe(res)
       return
     }
-    // 缓冲后处理（HTML 注入 / gzip）。超过上限则原样透传（已收字节未改动，content-length 仍有效）
+    // 缓冲后处理（HTML 注入 / bundle 改写 / gzip）。超过上限则原样透传（已收字节未改动，content-length 仍有效）
+    const bufferLimit = isHtml ? HTML_LIMIT : DG_BUFFER_LIMIT
     const chunks = []
     let size = 0, passthrough = false
     upRes.on('data', (c) => {
       if (passthrough) { res.write(c); return }
       chunks.push(c); size += c.length
-      if (size > HTML_LIMIT) {
+      if (size > bufferLimit) {
         passthrough = true
         res.writeHead(upRes.statusCode || 502, h)
         for (const pc of chunks) res.write(pc)
@@ -500,13 +584,18 @@ function forward(req, res) {
       let body = isHtml
         ? Buffer.from(injectHtml(Buffer.concat(chunks).toString('utf8')), 'utf8')
         : Buffer.concat(chunks)
+      if (rewrite) {
+        const out = externalizeImages(body)
+        // 改写方案将来若有变动，一天内自然失效，不至于让老旧缓存永远指向失效的图
+        if (out !== null) { body = out; h['cache-control'] = 'public, max-age=86400' }
+      }
       // 长度改变：清掉 hop-by-hop 头，重写 content-length（TE 与 CL 并存会被 fetch 拒绝）
       delete h['transfer-encoding']
       delete h['connection']
       delete h['keep-alive']
       if (isHtml) {
         h['cache-control'] = 'no-store' // 仅 HTML；hash 命名的静态资产必须保留浏览器缓存，否则流量反增
-      } else if (body.length > GZIP_MIN) {
+      } else if (clientGzip && body.length > GZIP_MIN) {
         body = zlib.gzipSync(body)
         h['content-encoding'] = 'gzip'
         h['vary'] = 'Accept-Encoding'
@@ -607,6 +696,7 @@ const server = http.createServer((req, res) => {
   // 不带会话 Cookie，若拦在 401 会导致主屏图标丢失。这些只是图标和清单，无敏感信息。
   if (req.url.startsWith('/pwa/')) { servePwa(req, res); return }
   if (!authed(req)) { sendPage(res, 401, UNAUTH_PAGE); return }
+  if (req.url.startsWith('/dg-asset/')) { serveDgAsset(req, res); return }
   forward(req, res)
 })
 
@@ -659,6 +749,7 @@ server.on('error', (err) => {
 })
 
 server.listen(PORT, BIND_HOST, () => {
+  pruneDgAssets()
   console.log(`listening on ${BIND_HOST}:${PORT} -> ${TARGET_HOST}:${TARGET_PORT}`)
   if (BIND_HOST === '0.0.0.0') {
     lanIp().then((ip) => {

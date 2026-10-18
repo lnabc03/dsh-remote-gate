@@ -109,8 +109,11 @@ proxy_send_timeout 600s;
 | env | `DSH_GATE_HEARTBEAT_MS` | `25000` | 非 WebKit 客户端的慢路径 102 心跳间隔；0 关闭；WebKit 自动豁免 |
 | env | `DSH_GATE_DRIP_GRACE_MS` / `DSH_GATE_DRIP_MS` | `20000` / `25000` | drip（仅 `/api/commands/execute`）宽限期 / 滴包间隔；宽限期 0 关闭 |
 | env | `DSH_GATE_DSH_TOKEN` / `DSH_GATE_DSH_TOKEN_FILE` | 自动 / `.dsh-web-token` | dsh 启动令牌。`npm start` 会自动从 dsh 输出抓取并落盘，**一般不用管**；只有「dsh 由你自己另开、网关单独跑」时才需要手动指定 |
+| env | `DSH_GATE_ASSET_DIR` | `.dg-assets` | 从 dsh bundle 里外链出来的图片落盘目录（已 gitignore）；一般不用管 |
 
 > **dsh 版本要求：≥ 0.2**。dsh 0.2 给 `dsh web` 加了自带的浏览器会话认证，网关自己用它的启动令牌换一份会话 Cookie 并缓存（`npm start` 自动完成，浏览器不参与）。详见 [`AGENTS.md`](AGENTS.md) 约束 12 与 [`PITFALLS.md`](PITFALLS.md) §4。
+
+> **首屏体积**：dsh 的插件把大图 base64 内联进 client.js（实测一条 bundle 10.7MB，其中 4.87MB 是引导截图，gzip 几乎压不动）。网关把这类大图外链成 `/dg-asset/<hash>.png` 由自己下发，前端 SW 再缓存住静态资源：首屏 JS 过线 5.97MB → 1.99MB，**再次冷启动 ≈ 0**。详见 [`AGENTS.md`](AGENTS.md) 约束 13。
 
 ## 安全模型
 
@@ -123,7 +126,7 @@ proxy_send_timeout 600s;
 ## 测试
 
 ```bash
-npm test   # 87 项：mock 上游 + 网关/面板/配置库/补丁锚点/看门狗等
+npm test   # 110 项：mock 上游 + 网关/面板/配置库/看门狗/会话 Cookie/内联图片外链等
 ```
 
 真机端到端清单见 [`TESTING.md`](TESTING.md)；踩坑记录与修复设计见 [`PITFALLS.md`](PITFALLS.md)；开发约束与文件职责见 [`AGENTS.md`](AGENTS.md)。
@@ -137,9 +140,10 @@ npm test   # 87 项：mock 上游 + 网关/面板/配置库/补丁锚点/看门�
 | `watchdog.mjs` | 面板看门狗：控制台意外死亡时自动关闭面板窗口 |
 | `admin.mjs` + `admin/` | 本地控制面板（QR 库、字体、图标均 vendored 于 `admin/vendor/`） |
 | `config-lib.mjs` / `setup.mjs` | 配置读写校验 / 隧道参数构造纯函数库 |
-| `pwa/` | manifest、最小 service worker、图标 |
+| `pwa/` | manifest、service worker（静态资源 cache-first）、图标 |
 | `frp/` / `cf/` | frpc 模板 / cloudflared 放置目录 |
 | `test/` | 自动化测试（`npm test`） |
+| `.dg-assets/` | 运行时生成：从 dsh bundle 里外链出来的内联图片（gitignore，可随时删） |
 
 ## 致谢
 

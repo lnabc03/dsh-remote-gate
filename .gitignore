@@ -6,4 +6,5 @@ cf/cloudflared.exe
 cf/cloudflared
 .dsh-usage-stats.json
 .dsh-web-token
+.dg-assets/
 start-crash.log

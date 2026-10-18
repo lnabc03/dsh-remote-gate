@@ -20,6 +20,7 @@
 | 半天跑了近 1G 隧道流量 | 早期为注入 HTML 全量摘除 `Accept-Encoding`，导致 JS bundle 未压缩过隧道 | `Accept-Encoding` **只在导航请求**（Accept 含 text/html）摘除。**dsh 0.2 起上游自己就带 gzip**（`compression: gzip, level 1, 阈值 1KB`），网关出站 gzip 因此几乎只剩兜底作用（上游已压缩即自动让路，实测同一 bundle 直连/过网关都是 237502 B，无二次压缩）。代码与豁免仍勿删：dsh 改压缩策略时会立刻退化，且导航摘 `Accept-Encoding` 是 HTML 注入的前提 |
 | 手机弱网断帧修复一次拉几百 KB | dsh 断帧修复原实现「整页重拉 `session.history` + 整窗替换」：一页 50 条消息 4.7MB raw / 541KB gz | 0.1.x 时代靠 `patch-dsh.mjs`（**已删除**）改 `repairTailMerge` 增量合并。**dsh 0.2 该补丁失效，而问题更严重**：新版 `dsh-api-session-controller/lib/client.js` 的 `HISTORY_PAGE_OPTIONS` 是 `{maxMessages:500, turnWindow:{minMessages:50,minTurns:2}}`，重连与断帧修复仍整页重拉并整窗替换，实测单个会话重连可拉 ~1.1MB raw（撞 500 上限时可达 ~11MB raw，gzip 约 1/8）。要修需直接改那个常量（最省事）或动 `dsh-api-gateway/lib/client.js` 的 `RemoteJournalStream` 做真正的增量合并 |
 | 不知道流量花在哪 | — | 网关每小时打印一行 `[gate] 流量: ↓… ↑…`，下行口径 = 写回浏览器侧的 post-gzip 字节（即过隧道计费口径），并附下行 top3 路径热点榜 `路径 字节×次数`，区分「少量大响应」与「高频重拉」 |
+| 移动端 PWA 冷启动要 ~20s 才出界面（换服务器后尤其明显） | dsh 0.2 的客户端插件把大图**内联**进 client.js：实测 `dsh-client-ui-settings-account` 那条 bundle 里塞了 8 张 3993×2480 的引导截图，base64 共 4.87MB，占整条 bundle（10.72MB）近一半。图片数据 gzip 几乎压不动，整条 gzip 后仍是 5.35MB；首屏 JS 合计 5.97MB。隧道吞吐实测只有 ~160KB/s（服务器出站带宽 + frp），一个文件就是 30s+ | **不是压缩的问题**（dsh 的 level 1 与 gzip -9 只差 5%，brotli q5 只差 10%）。真正的解法是别传这些字节：网关把 `/plugins/` 响应里的「≥2048 字符的 `data:image/…;base64`」换成 `/dg-asset/<sha256前16位>.<ext>`（落盘 `.dg-assets/`，immutable 下发），bundle 过线 5.48MB → 1.43MB、首屏 JS 5.97MB → 1.99MB；图片只在该界面真的渲染时才取。再配合 SW 缓存静态资产，重复冷启动 ~0 字节 |
 
 ## 3. Windows 进程管理
 
@@ -67,6 +68,7 @@
 | Android Chrome 没有「安装应用」入口 | Chrome 安装启发式硬条件：需互动并停留约 30s；厂商自带浏览器大多阉割 PWA 安装 | 用 Chrome/Edge 打开、点几下并停留后再装；无 Google Play 服务的 ROM 无法铸 WebAPK，退化为普通快捷方式（已知限制） |
 | lan 模式 Android 无法完整安装 | HTTP 明文下浏览器不注册 Service Worker | 预期降级：Android 退化为浏览器快捷方式；iPhone 仍可「添加到主屏幕」成 web clip。完整 PWA 只在 HTTPS（frp/ssh）下可用 |
 | cf 模式装的 PWA 重启后失效 | 临时域名每次启动更换，安装产物随旧 origin 作废 | 预期行为：cf 模式不建议安装，直接用浏览器标签页 |
+| 加了 SW 缓存后「下拉刷新拿到旧页面」 | 曾经把 HTML 也缓存进 SW | SW **只碰 URL 里带 rev/内容哈希的静态资源**（`/plugins/`、`/assets/`、`/dg-asset/`、`/pwa/`，cache-first），文档与 `/api` 一律不拦截不缓存——文件变了 URL 必变，所以不存在拿到旧代码的可能。改缓存策略时同步 bump `pwa/sw.js` 里的 `VERSION`（activate 会清掉旧 cache） |
 
 ## 6. 配置与状态
 
