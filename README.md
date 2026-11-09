@@ -1,5 +1,11 @@
 # dsh-remote-gate
 
+> **⚠️ 本项目已归档，不再维护（2026-11-09）。**
+>
+> 市面上同类项目已经很多，其中 [liguobao/ds-harness-remote](https://github.com/liguobao/ds-harness-remote) 的完成度、性能和安全性都明显更强，并且已有完善的客户端生态；我在实际使用中体验非常好，因此决定停止维护本项目，推荐改用该项目。
+>
+> 归档后仓库为只读：不再接受 Issue / PR，也不会再有功能更新或安全修复。代码仍以 MIT 协议保留，可自行 fork 继续使用或修改；已有部署可以照常运行，但后续风险请自行评估。
+
 > 最小化的 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（DSH）远程访问网关：手机/平板经公网服务器（frp 或 SSH 反向隧道）、Cloudflare 临时隧道（零服务器）或同一局域网，安全操控本机的 DSH Web UI，可安装为 PWA。
 
 纯 Node ≥ 18，**零 npm 依赖**。只做三件事：**令牌认证 · 反向代理（含 WebSocket）· PWA 注入**。
